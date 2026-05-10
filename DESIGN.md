@@ -41,8 +41,8 @@ The system MUST NOT:
 
 The extension reads two files and merges them into a single effective configuration:
 
-1. **Global config:** `~/.pi/sandbox.json` (optional). If missing or invalid JSON, treated as `{}`.
-2. **Workspace config:** `sandbox.json` in the workspace root (`process.cwd()` at session start). If the file is missing or invalid JSON, session start MUST fail with an explicit error.
+1. **Global config:** `~/.pi/sandbox.json` (required). If the file is missing or invalid JSON, session start MUST fail with an explicit error.
+2. **Workspace config:** `sandbox.json` in the workspace root (`process.cwd()` at session start). If missing or invalid JSON, treated as `{}` with a warning.
 
 The merged configuration follows the schema in §3.2.
 
@@ -255,7 +255,7 @@ const stream = await exec.start({ hijack: true, stdin: false });
 // Collect stdout/stderr from stream, then inspect exec for exit code.
 ```
 
-- `cwd` defaults to `workspaceAbsolutePath`.
+- `cwd` defaults to the container's `WorkingDir`, which is set to `workspaceAbsolutePath` at creation.
 - The container's `$HOME` is set to the host user's home directory so tilde expansion matches the Guard.
 - Signal handling / timeout: UNDERSPECIFIED for v1. If the framework cancels the call, the behavior is best-effort.
 

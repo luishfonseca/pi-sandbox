@@ -123,6 +123,17 @@ describe("createSandboxExtension", () => {
     assert.strictEqual(firstTool.name, "bash");
   });
 
+  it("blocks tool calls when sandbox is not initialized", async () => {
+    const pi = createMockPi();
+    createSandboxExtension()(pi);
+
+    const result = await getHandler(pi, "tool_call")(
+      { toolName: "read", input: { path: "./file.txt" } },
+      createMockCtx(tmpDir),
+    );
+    assert.deepStrictEqual(result, { block: true, reason: "Sandbox not initialized" });
+  });
+
   it("blocks read outside workspace", async () => {
     const config: SandboxConfig = { image: "alpine", env: {}, filesystem: { rw: [], ro: [] } };
     const pi = createMockPi();

@@ -107,7 +107,7 @@ export function createSandboxExtension(options: SandboxExtensionOptions = {}): (
       }
 
       if (config === undefined || workspaceAbsolutePath === undefined) {
-        return undefined;
+        return { block: true, reason: "Sandbox not initialized" };
       }
 
       let path: string | undefined;
