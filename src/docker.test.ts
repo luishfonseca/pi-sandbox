@@ -18,6 +18,18 @@ import type { FilesystemConfig, SandboxConfig } from "./config.js";
 const IMAGE = "alpine:latest";
 const docker = new Dockerode();
 
+async function isDockerAvailable(): Promise<boolean> {
+  try {
+    await docker.ping();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+const dockerAvailable = await isDockerAvailable();
+const describeIntegration = dockerAvailable ? describe : describe.skip;
+
 async function removeContainer(name: string): Promise<void> {
   try {
     const container = docker.getContainer(name);
@@ -62,7 +74,7 @@ describe("createMissingDirs", () => {
   });
 });
 
-describe("ensureContainer integration", () => {
+describeIntegration("ensureContainer integration", () => {
   let containerName: string;
 
   beforeEach(() => {
@@ -200,7 +212,7 @@ describe("pullImage", () => {
   });
 });
 
-describe("execInContainer integration", () => {
+describeIntegration("execInContainer integration", () => {
   let containerName: string;
   let container: Dockerode.Container;
 
