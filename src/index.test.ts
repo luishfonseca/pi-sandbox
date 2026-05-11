@@ -1,6 +1,6 @@
 import assert from "node:assert";
 import { afterEach, beforeEach, describe, it } from "node:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
@@ -306,5 +306,91 @@ describe("createSandboxExtension", () => {
       throw new Error("Missing content item");
     }
     assert.ok(firstContent.text.includes("network timeout"));
+  });
+
+  it("blocks symlink loop with mapped reason", async () => {
+    const config: SandboxConfig = { image: "alpine", env: {}, filesystem: { rw: [], ro: [] } };
+    const pi = createMockPi();
+    const mockContainer = {
+      inspect: () => Promise.resolve({ State: { Running: true } }),
+    } as unknown as Container;
+
+    const ext = createSandboxExtension({
+      loadConfigFn: () => config,
+      doesImageExistFn: () => Promise.resolve(true),
+      ensureContainerFn: () => Promise.resolve(mockContainer),
+    });
+    ext(pi);
+
+    const ctx = createMockCtx(tmpDir);
+    await getHandler(pi, "session_start")({}, ctx);
+
+    const linkA = join(tmpDir, "a");
+    const linkB = join(tmpDir, "b");
+    symlinkSync(linkB, linkA);
+    symlinkSync(linkA, linkB);
+
+    const result = await getHandler(pi, "tool_call")(
+      { toolName: "read", input: { path: join(linkA, "file") } },
+      ctx,
+    );
+    assert.deepStrictEqual(result, { block: true, reason: `Symlink loop detected: ${join(linkA, "file")}` });
+  });
+
+  it("allows broken symlink inside workspace and delegates ENOENT to native tool", async () => {
+    const config: SandboxConfig = { image: "alpine", env: {}, filesystem: { rw: [], ro: [] } };
+    const pi = createMockPi();
+    const mockContainer = {
+      inspect: () => Promise.resolve({ State: { Running: true } }),
+    } as unknown as Container;
+
+    const ext = createSandboxExtension({
+      loadConfigFn: () => config,
+      doesImageExistFn: () => Promise.resolve(true),
+      ensureContainerFn: () => Promise.resolve(mockContainer),
+    });
+    ext(pi);
+
+    const ctx = createMockCtx(tmpDir);
+    await getHandler(pi, "session_start")({}, ctx);
+
+    const link = join(tmpDir, "broken");
+    symlinkSync("/nonexistent/target", link);
+
+    const result = await getHandler(pi, "tool_call")(
+      { toolName: "read", input: { path: join(tmpDir, "broken") } },
+      ctx,
+    );
+    assert.strictEqual(result, undefined);
+  });
+
+  it("blocks symlink bypass to disallowed external path", async () => {
+    const config: SandboxConfig = { image: "alpine", env: {}, filesystem: { rw: [], ro: [] } };
+    const pi = createMockPi();
+    const mockContainer = {
+      inspect: () => Promise.resolve({ State: { Running: true } }),
+    } as unknown as Container;
+
+    const ext = createSandboxExtension({
+      loadConfigFn: () => config,
+      doesImageExistFn: () => Promise.resolve(true),
+      ensureContainerFn: () => Promise.resolve(mockContainer),
+    });
+    ext(pi);
+
+    const ctx = createMockCtx(tmpDir);
+    await getHandler(pi, "session_start")({}, ctx);
+
+    const externalDir = mkdtempSync(join(tmpdir(), "pi-sandbox-external-"));
+    const link = join(tmpDir, "secret");
+    symlinkSync(externalDir, link);
+
+    const result = await getHandler(pi, "tool_call")(
+      { toolName: "read", input: { path: join(tmpDir, "secret") } },
+      ctx,
+    );
+    assert.deepStrictEqual(result, { block: true, reason: `Path outside workspace: ${join(tmpDir, "secret")}` });
+
+    rmSync(externalDir, { recursive: true, force: true });
   });
 });

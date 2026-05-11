@@ -132,7 +132,7 @@ describeIntegration("ensureContainer integration", () => {
 describe("doesImageExist", () => {
   it("returns true when image exists", async () => {
     const docker = {
-      getImage: () => ({
+      getImage: (): { inspect: () => Promise<Record<string, unknown>> } => ({
         inspect: () => Promise.resolve({}),
       }),
     } as unknown as Dockerode;
@@ -141,7 +141,7 @@ describe("doesImageExist", () => {
 
   it("returns false when image is not found", async () => {
     const docker = {
-      getImage: () => ({
+      getImage: (): { inspect: () => Promise<never> } => ({
         inspect: () => Promise.reject(Object.assign(new Error("not found"), { statusCode: 404 })),
       }),
     } as unknown as Dockerode;
@@ -150,7 +150,7 @@ describe("doesImageExist", () => {
 
   it("throws on unexpected errors", async () => {
     const docker = {
-      getImage: () => ({
+      getImage: (): { inspect: () => Promise<never> } => ({
         inspect: () => Promise.reject(new Error("boom")),
       }),
     } as unknown as Dockerode;

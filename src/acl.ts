@@ -1,12 +1,15 @@
 import { homedir } from "node:os";
-import { resolve } from "node:path";
+import { resolve, dirname, basename, join } from "node:path";
+import { realpathSync } from "node:fs";
 import type { FilesystemConfig } from "./config.js";
 
 export type AccessOperation = "read" | "write";
 
+export type DenialReason = "outside-workspace" | "read-only";
+
 export interface AccessResult {
   allowed: boolean;
-  reason?: string;
+  reason?: DenialReason;
 }
 
 export function resolvePath(path: string, workspaceAbsolutePath: string): string {
@@ -24,6 +27,28 @@ export function resolvePath(path: string, workspaceAbsolutePath: string): string
     return resolved.slice(0, -1);
   }
   return resolved;
+}
+
+function isNodeError(err: unknown): err is NodeJS.ErrnoException {
+  return err instanceof Error && "code" in err;
+}
+
+export function resolveSymlinks(path: string): string {
+  try {
+    return realpathSync(path, { encoding: "utf8" });
+  } catch (err) {
+    if (isNodeError(err) && err.code === "ENOENT") {
+      if (path === "/" || path === "") {
+        throw err;
+      }
+      const parent = dirname(path);
+      if (parent === path) {
+        throw err;
+      }
+      return join(resolveSymlinks(parent), basename(path));
+    }
+    throw err;
+  }
 }
 
 function prefixMatches(path: string, prefix: string): boolean {
@@ -65,7 +90,7 @@ export function evaluateAccess(
     } else {
       return {
         allowed: false,
-        reason: `Path outside workspace: ${resolvedPath}`,
+        reason: "outside-workspace",
       };
     }
   }
@@ -77,7 +102,7 @@ export function evaluateAccess(
   if (bestLevel === "ro") {
     return {
       allowed: false,
-      reason: `Read-only path: ${resolvedPath}`,
+      reason: "read-only",
     };
   }
 

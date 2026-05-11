@@ -215,7 +215,7 @@ export async function pullImage(
           reject(err);
           return;
         }
-        const firstError = output?.find((obj) => obj.error)?.error;
+        const firstError = output.find((obj) => obj.error)?.error;
         if (firstError) {
           reject(new Error(firstError));
           return;

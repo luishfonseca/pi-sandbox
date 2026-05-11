@@ -120,7 +120,7 @@ This makes the extension fully transparent and indistinguishable from an unloade
 
 **Postcondition:** `resolvedPath` is an absolute string with no trailing `/` (except root `/`).
 
-**UNDERSPECIFIED: Symlink traversal.** v1 does NOT call `fs.realpathSync`. A symlink inside the workspace pointing outside the workspace is treated according to the resolved path string, not the symlink target. This is a known limitation.
+**Symlink traversal.** See [DESIGN_EXTENSION.symlinks.md](DESIGN_EXTENSION.symlinks.md).
 
 **UNDERSPECIFIED: macOS case sensitivity.** Path comparison is case-sensitive on all platforms for v1.
 
@@ -336,6 +336,8 @@ Output: { stderr: "... No such file or directory", exitCode: 1 }
 
 Session shutdown does **not** stop or remove the container. The container persists until the user destroys it manually or via a future `cleanup` command.
 
+> **Extension point:** Automatic container cleanup is deferred to §8.8.
+
 ---
 
 ## 7. Security Properties
@@ -350,7 +352,7 @@ Session shutdown does **not** stop or remove the container. The container persis
 | Syscall filtering | Docker default seccomp profile | ~50 dangerous syscalls blocked by default |
 
 **Known limitations (accepted for v1):**
-- Symlinks are not resolved before ACL checks. A symlink to `/etc/shadow` inside the workspace is treated as a workspace path.
+- Symlinks are not resolved before ACL checks. A symlink to `/etc/shadow` inside the workspace is treated as a workspace path. See [DESIGN_EXTENSION.symlinks.md](DESIGN_EXTENSION.symlinks.md) for the resolution extension.
 - Network is fully disabled (`HostConfig.NetworkMode: "none"`). There is no per-domain egress filtering.
 
 ---
@@ -361,11 +363,12 @@ The following are explicitly deferred. v1 MUST compile and run without them.
 
 1. **Egress sidecar / per-domain filtering.** Replace `HostConfig.NetworkMode: "none"` with a bridge network + sidecar.
 2. **Cache persistence.** Named volumes for package managers.
-3. **Symlink resolution.** Call `fs.realpathSync` before ACL evaluation.
+3. **Symlink resolution.** Call `fs.realpathSync` before ACL evaluation. Specified in [DESIGN_EXTENSION.symlinks.md](DESIGN_EXTENSION.symlinks.md).
 4. **Mask / downgrade mounts.** VFS-level enforcement of read-only restrictions inside read-write trees.
 5. **Signal / timeout handling.** Kill `docker exec` processes on cancellation.
 6. **Custom capabilities.** `capabilities: string[]` in config.
 7. **Config reload.** Recreate container when `sandbox.json` changes and user calls /reload.
+8. **Container cleanup.** Automatic stop / remove of the sandbox container on session shutdown, workspace change, or idle timeout. v1 leaves the container running for reuse and relies on manual cleanup.
 
 ---
 

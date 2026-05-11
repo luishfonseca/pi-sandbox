@@ -3,7 +3,7 @@ import { createBashTool, isToolCallEventType } from "@mariozechner/pi-coding-age
 import { Type } from "@sinclair/typebox";
 import { realpathSync } from "node:fs";
 import Dockerode from "dockerode";
-import { evaluateAccess, resolvePath, type AccessOperation } from "./acl.js";
+import { evaluateAccess, resolvePath, resolveSymlinks, type AccessOperation } from "./acl.js";
 import { loadConfig, type SandboxConfig } from "./config.js";
 import {
   ensureContainer,
@@ -83,7 +83,7 @@ export function createSandboxExtension(options: SandboxExtensionOptions = {}): (
             );
             container = runningContainer;
           })
-          .catch((err) => {
+          .catch((err: unknown) => {
             pullError = err instanceof Error ? err.message : String(err);
           })
           .finally(() => {
@@ -125,12 +125,39 @@ export function createSandboxExtension(options: SandboxExtensionOptions = {}): (
         return { block: true, reason: "Missing or invalid path argument" };
       }
 
-      const resolved = resolvePath(path, workspaceAbsolutePath);
+      const normalized = resolvePath(path, workspaceAbsolutePath);
+
+      let resolved: string;
+      try {
+        resolved = resolveSymlinks(normalized);
+      } catch (err) {
+        if (err instanceof Error && "code" in err) {
+          const code = (err as NodeJS.ErrnoException).code;
+          if (code === "ENOENT") {
+            return { block: true, reason: `Path outside workspace: ${path}` };
+          }
+          if (code === "EACCES") {
+            return { block: true, reason: `Permission denied resolving path: ${path}` };
+          }
+          if (code === "ELOOP") {
+            return { block: true, reason: `Symlink loop detected: ${path}` };
+          }
+          if (code === "ENOTDIR") {
+            return { block: true, reason: `Not a directory in path: ${path}` };
+          }
+        }
+        throw err;
+      }
+
       const operation: AccessOperation = event.toolName === "read" ? "read" : "write";
       const result = evaluateAccess(resolved, operation, config.filesystem, workspaceAbsolutePath);
 
       if (!result.allowed) {
-        return { block: true, reason: result.reason ?? "Path blocked by sandbox policy" };
+        const reason =
+          result.reason === "outside-workspace"
+            ? `Path outside workspace: ${path}`
+            : `Read-only path: ${path}`;
+        return { block: true, reason };
       }
 
       return undefined;
