@@ -1,3 +1,14 @@
+## Repository Context
+
+This is `pi-sandbox`, a Pi extension. See `spec/DESIGN.md` for the full behavioral specification and `src/index.ts` for the extension entry point.
+
+### Spec Structure (`spec/`)
+
+- **`spec/DESIGN.md`** — Root specification. Schema-first, section-numbered (§1–§9). Defines preconditions, postconditions, and concrete input/output examples that serve as acceptance criteria.
+- **`spec/DESIGN_EXTENSION.*.md`** — Modular extensions that replace or append to specific subsections of `DESIGN.md` by reference. Each targets a single concern (e.g., `DESIGN_EXTENSION.symlinks.md` replaces the `UNDERSPECIFIED` paragraph in §4.2). Extensions are independently mergeable and must not duplicate the root spec.
+
+**Invariant:** Behavioral changes start in `spec/` and are only then reflected in `src/` and `tests/`.
+
 ## Guidelines
 
 - **Escalate rigid rules.** If a guideline conflicts with existing conventions, idioms, or practical constraints, raise it with me before overriding local patterns.

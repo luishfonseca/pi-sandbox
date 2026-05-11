@@ -368,7 +368,7 @@ The following are explicitly deferred. v1 MUST compile and run without them.
 5. **Signal / timeout handling.** Kill `docker exec` processes on cancellation.
 6. **Custom capabilities.** `capabilities: string[]` in config.
 7. **Config reload.** Recreate container when `sandbox.json` changes and user calls /reload.
-8. **Container cleanup.** Automatic stop / remove of the sandbox container on session shutdown, workspace change, or idle timeout. v1 leaves the container running for reuse and relies on manual cleanup.
+8. **Container cleanup.** Automatic stop / remove of the sandbox container on session shutdown or workspace change. v1 leaves the container running for reuse and relies on manual cleanup.
 
 ---
 
