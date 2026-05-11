@@ -11,7 +11,7 @@ Both layers are driven by a single policy declared in `sandbox.json` in the work
 
 The extension registers a `--no-sandbox` CLI flag. When this flag is set, the extension becomes transparent: it does not start a container, does not enforce filesystem ACLs, and delegates `bash` calls to the built-in native `bash` tool. From the user's perspective, the extension is indistinguishable from not being installed.
 
-**Critical path:** The system must ensure a sandbox container is running for the current workspace, enforce the declared ACL on every intercepted tool call, and leave the container running for reuse by later sessions. Everything else is an extension point.
+**Critical path:** The system must ensure a sandbox container is running for the current workspace, enforce the declared ACL on every intercepted tool call, and share the container across sessions in the same workspace. The container is stopped and removed when the last session ends. Everything else is an extension point.
 
 ---
 
@@ -217,13 +217,7 @@ The extension overrides the built-in `bash` tool. Every `bash` tool call is exec
 
 ### 5.2 Container Naming
 
-The container name is derived from the Pi session ID so the extension does not need to compute its own workspace hash.
-
-```
-containerName = pi-sandbox-{ctx.sessionManager.getSessionId()}
-```
-
-This makes the container scoped to the current Pi session. Multiple sessions in the same workspace each get their own container.
+The container name is derived from the workspace path so that all sessions in the same workspace share one container. See [DESIGN_EXTENSION.workspace-scoped.md](DESIGN_EXTENSION.workspace-scoped.md) §2.1 for the naming scheme and §2.4 for lifecycle details.
 
 
 
@@ -292,51 +286,16 @@ Output: { stderr: "... No such file or directory", exitCode: 1 }
 ### 6.1 Session Start
 
 **Precondition:** Docker daemon is reachable.  
-**Postcondition:** The sandbox container is running, or an image pull is in progress.
+**Postcondition:** The sandbox container is running (or image pull is in progress), and the current session is registered as a user of the workspace-scoped container.
 
-```
-1. Read and parse global `~/.pi/sandbox.json` (optional) and workspace `sandbox.json`.
-2. Merge the two configs according to §3.3.
-3. Validate the merged config (§3.2).
-4. Resolve workspaceAbsolutePath ← fs.realpathSync(process.cwd()).
-5. Compute containerName = `pi-sandbox-${ctx.sessionManager.getSessionId()}`.
-6. Check if the Docker image exists locally.
-   If the image is missing, start an asynchronous pull in the background.
-   Bash tool calls will return a "Pull in progress" status until the pull completes.
-   Once the pull finishes, create and start the container automatically.
-   If the pull fails, subsequent bash calls will return the pull error.
-7. If the image exists, ensure the container is running:
-   If a container with this name already exists and is running, reuse it.
-   If it exists but is stopped, start it.
-   If it does not exist, create and start it via dockerode:
-
-   docker.createContainer({
-     name: containerName,
-     Image: config.image,
-     Cmd: ["sleep", "infinity"],
-     HostConfig: {
-       NetworkMode: "none",
-       CapDrop: ["ALL"],
-       SecurityOpt: ["no-new-privileges:true"],
-       Binds: buildBindMounts(config.filesystem, workspaceAbsolutePath),
-     },
-     Env: buildEnvVars(config.env, hostHomeDirectory),
-     WorkingDir: workspaceAbsolutePath,
-   })
-   await container.start()
-8. Mark session ready.
-```
-
-**Note:** The container is scoped to the current Pi session (`ctx.sessionManager.getSessionId()`). It persists for the lifetime of the session and is not reused by other sessions.
+The full session start algorithm — including container naming, refcount acquisition, config hash computation, and staleness detection — is specified in [DESIGN_EXTENSION.workspace-scoped.md](DESIGN_EXTENSION.workspace-scoped.md) §2.
 
 ### 6.2 Session Shutdown
 
 **Triggered by:** `session_shutdown` event.  
-**Postcondition:** The container is still running (no action taken).
+**Postcondition:** The session's reference file is removed. If no references remain, the container is stopped and removed.
 
-Session shutdown does **not** stop or remove the container. The container persists until the user destroys it manually or via a future `cleanup` command.
-
-> **Extension point:** Automatic container cleanup is deferred to §8.8.
+See [DESIGN_EXTENSION.workspace-scoped.md](DESIGN_EXTENSION.workspace-scoped.md) §2.5 for the shutdown algorithm and §2.7 for the `/prune-sandbox` recovery command.
 
 ---
 
@@ -348,7 +307,7 @@ Session shutdown does **not** stop or remove the container. The container persis
 | Network isolation | `HostConfig.NetworkMode: "none"` | No network access from sandbox |
 | Process isolation | Docker container | Host PID namespace not shared |
 | Privilege dropping | `HostConfig.CapDrop: ["ALL"]`, `HostConfig.SecurityOpt: ["no-new-privileges:true"]` | Container cannot escalate privileges |
-| Filesystem hygiene | Persistent container | Reused across sessions; manual cleanup required |
+| Filesystem hygiene | Workspace-scoped container with refcount | Shared across sessions in same workspace; automatic cleanup when last session ends |
 | Syscall filtering | Docker default seccomp profile | ~50 dangerous syscalls blocked by default |
 
 **Known limitations (accepted for v1):**
@@ -368,7 +327,7 @@ The following are explicitly deferred. v1 MUST compile and run without them.
 5. **Signal / timeout handling.** Kill `docker exec` processes on cancellation.
 6. **Custom capabilities.** `capabilities: string[]` in config.
 7. **Config reload.** Recreate container when `sandbox.json` changes and user calls /reload.
-8. **Container cleanup.** Automatic stop / remove of the sandbox container on session shutdown or workspace change. v1 leaves the container running for reuse and relies on manual cleanup.
+8. **`/prune-sandbox` command.** A registered command that force-stops and removes the workspace sandbox container, clearing all refcount state. This recreates the container with the latest config on the next session start. It is also used to recover from leaked reference files after a crash. Specified in [DESIGN_EXTENSION.workspace-scoped.md](DESIGN_EXTENSION.workspace-scoped.md) §2.7.
 
 ---
 
