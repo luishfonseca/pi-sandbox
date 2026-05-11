@@ -1,7 +1,10 @@
 import Dockerode from "dockerode";
 import { mkdirSync } from "node:fs";
-import type { FilesystemConfig, SandboxConfig } from "./config.js";
+import { kill } from "node:process";
 import { PassThrough } from "node:stream";
+import { truncateTail, DEFAULT_MAX_LINES, DEFAULT_MAX_BYTES } from "@mariozechner/pi-coding-agent";
+import type { TruncationResult } from "@mariozechner/pi-coding-agent";
+import type { FilesystemConfig, SandboxConfig } from "./config.js";
 
 export class DockerDaemonUnreachableError extends Error {
   constructor() {
@@ -15,20 +18,58 @@ export class ContainerNotRunningError extends Error {
   }
 }
 
-export interface ExecResult {
-  stdout: string;
-  stderr: string;
-  exitCode: number;
+export interface ExecInContainerOptions {
+  command: string;
+  cwd: string;
+  timeout?: number | undefined;
+  signal?: AbortSignal | undefined;
+  onUpdate?:
+    | ((payload: {
+        content: { type: "text"; text: string }[];
+        details: { truncation?: TruncationResult | undefined };
+      }) => void)
+    | undefined;
 }
 
-interface ExecWithModem {
-  modem: {
-    demuxStream(
-      source: NodeJS.ReadableStream,
-      stdout: NodeJS.WritableStream,
-      stderr: NodeJS.WritableStream,
-    ): void;
-  };
+export interface ExecInContainerResult {
+  stdout: string;
+  stderr: string;
+  exitCode: number | null;
+  timedOut: boolean;
+  aborted: boolean;
+}
+
+interface DockerModem {
+  demuxStream(
+    source: NodeJS.ReadableStream,
+    stdout: NodeJS.WritableStream,
+    stderr: NodeJS.WritableStream,
+  ): void;
+}
+
+/**
+ * Kills a Docker exec instance by sending SIGKILL to its host PID.
+ *
+ * exec.inspect() returns the PID in the caller's PID namespace, so we can
+ * kill it directly with process.kill(). This works for both regular and
+ * rootless Docker because the PID returned by the daemon is in the same
+ * namespace as the Node process. It avoids dockerode's missing exec.kill()
+ * and the Engine API's non-existent /exec/{id}/kill endpoint.
+ *
+ * Ignores ESRCH (process already gone) and Pid 0 (process never started).
+ */
+async function killExec(exec: Dockerode.Exec, sig: NodeJS.Signals = "SIGKILL"): Promise<void> {
+  const info = await exec.inspect();
+  const pid = info.Pid;
+  if (pid === 0) return;
+  try {
+    kill(pid, sig);
+  } catch (err) {
+    if (err instanceof Error && "code" in err && (err as { code: string }).code === "ESRCH") {
+      return;
+    }
+    throw err;
+  }
 }
 
 export function buildBindMounts(
@@ -196,45 +237,155 @@ export async function stopAndRemoveContainer(
 
 export async function execInContainer(
   container: Dockerode.Container,
-  command: string,
-  cwd?: string,
-): Promise<ExecResult> {
+  options: ExecInContainerOptions,
+): Promise<ExecInContainerResult> {
+  const { command, cwd, timeout, signal, onUpdate } = options;
+
+  if (signal?.aborted) {
+    return { stdout: "", stderr: "", exitCode: null, timedOut: false, aborted: true };
+  }
+
   const exec = await container.exec({
     Cmd: ["sh", "-c", command],
     WorkingDir: cwd,
     AttachStdout: true,
     AttachStderr: true,
   });
+
+  if (signal?.aborted) {
+    return { stdout: "", stderr: "", exitCode: null, timedOut: false, aborted: true };
+  }
+
   const stream = await exec.start({ hijack: true, stdin: false });
+
+  if (signal?.aborted) {
+    await killExec(exec, "SIGKILL");
+    stream.destroy();
+    return { stdout: "", stderr: "", exitCode: null, timedOut: false, aborted: true };
+  }
 
   const stdout = new PassThrough();
   const stderr = new PassThrough();
   const stdoutChunks: Buffer[] = [];
   const stderrChunks: Buffer[] = [];
+  const rollingChunks: Buffer[] = [];
+  let rollingBytes = 0;
+  const maxRollingBytes = DEFAULT_MAX_BYTES * 2;
 
-  stdout.on("data", (chunk: Buffer) => {
+  const pushToRollingBuffer = (chunk: Buffer): void => {
+    rollingChunks.push(chunk);
+    rollingBytes += chunk.length;
+    while (rollingBytes > maxRollingBytes && rollingChunks.length > 1) {
+      const removed = rollingChunks.shift();
+      if (removed === undefined) break;
+      rollingBytes -= removed.length;
+    }
+  };
+
+  const emitUpdate = (): void => {
+    if (!onUpdate) return;
+    const fullBuffer = Buffer.concat(rollingChunks);
+    const fullText = fullBuffer.toString("utf-8");
+    const truncation = truncateTail(fullText, {
+      maxLines: DEFAULT_MAX_LINES,
+      maxBytes: DEFAULT_MAX_BYTES,
+    });
+    onUpdate({
+      content: [{ type: "text", text: truncation.content || "" }],
+      details: truncation.truncated ? { truncation } : {},
+    });
+  };
+
+  stdout.on("data", (chunk: Buffer): void => {
     stdoutChunks.push(chunk);
-  });
-  stderr.on("data", (chunk: Buffer) => {
-    stderrChunks.push(chunk);
+    pushToRollingBuffer(chunk);
+    emitUpdate();
   });
 
-  (exec as ExecWithModem).modem.demuxStream(stream, stdout, stderr);
+  stderr.on("data", (chunk: Buffer): void => {
+    stderrChunks.push(chunk);
+    pushToRollingBuffer(chunk);
+    emitUpdate();
+  });
+
+  const modem = (exec as unknown as { modem: DockerModem }).modem;
+  modem.demuxStream(stream, stdout, stderr);
+
+  let timedOut = false;
+  let aborted = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+
+  if (timeout !== undefined && timeout > 0) {
+    timer = setTimeout(() => {
+      timedOut = true;
+      void killExec(exec, "SIGKILL");
+      stream.destroy();
+    }, timeout * 1000);
+  }
+
+  let abortHandler: (() => void) | undefined;
+  if (signal) {
+    abortHandler = (): void => {
+      aborted = true;
+      void killExec(exec, "SIGKILL");
+      stream.destroy();
+    };
+    signal.addEventListener("abort", abortHandler);
+  }
 
   await new Promise<void>((resolve, reject) => {
-    stream.on("end", () => {
+    const onEnd = (): void => {
+      cleanup();
       resolve();
-    });
-    stream.on("error", (err) => {
-      reject(err);
-    });
+    };
+    const onClose = (): void => {
+      cleanup();
+      resolve();
+    };
+    const onError = (err: Error): void => {
+      cleanup();
+      if (timedOut || aborted) {
+        resolve();
+      } else {
+        reject(err);
+      }
+    };
+    const cleanup = (): void => {
+      stream.off("end", onEnd);
+      stream.off("close", onClose);
+      stream.off("error", onError);
+    };
+    stream.on("end", onEnd);
+    stream.on("close", onClose);
+    stream.on("error", onError);
   });
 
-  const info = await exec.inspect();
+  if (timer !== undefined) {
+    clearTimeout(timer);
+  }
+  if (abortHandler !== undefined && signal) {
+    signal.removeEventListener("abort", abortHandler);
+  }
+
+  let exitCode: number | null = null;
+  if (!timedOut && !aborted) {
+    try {
+      const info = await exec.inspect();
+      exitCode = info.ExitCode ?? null;
+    } catch {
+      exitCode = null;
+    }
+  }
+
+  const resultStdout = Buffer.concat(stdoutChunks).toString("utf-8");
+  const resultStderr = Buffer.concat(stderrChunks).toString("utf-8");
+
   return {
-    stdout: Buffer.concat(stdoutChunks).toString("utf-8"),
-    stderr: Buffer.concat(stderrChunks).toString("utf-8"),
-    exitCode: info.ExitCode ?? -1,
+    stdout: resultStdout,
+    stderr: resultStderr,
+    exitCode,
+    timedOut,
+    aborted,
   };
 }
 

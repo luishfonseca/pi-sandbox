@@ -198,23 +198,9 @@ Result:  BLOCK — reason: "Path outside workspace: /etc/passwd"
 
 ## 5. Containerized Bash
 
-### 5.1 Tool Override Contract
+### 5.1 Bash Tool Contract
 
-The extension overrides the built-in `bash` tool. Every `bash` tool call is executed inside the sandbox container via **dockerode**.
-
-**Preconditions:**
-1. The sandbox container is running.
-
-**Postconditions:**
-1. The command executes as a new process inside the container.
-2. `stdout` and `stderr` are collected from the stream.
-3. The combined output is truncated per §5.5 before being returned in `content`. `details` retains the full, untruncated strings.
-4. The exit code is returned.
-
-**Error conditions:**
-- Container not running → return `{ error: "Sandbox container not running" }`
-- Docker daemon unreachable → return `{ error: "Docker daemon unreachable" }`
-- `cwd` not mounted inside container → exec returns `{ stderr: "... No such file or directory", exitCode: 1 }`
+The full behavioral specification for the overridden `bash` tool — including the tool override contract, parameter schema, fallback semantics, execution semantics (timeout, cancellation, real-time streaming), error conditions, output truncation, and examples — is specified in [DESIGN_EXTENSION.bash-contract.md](DESIGN_EXTENSION.bash-contract.md).
 
 ### 5.2 Container Naming
 
@@ -234,81 +220,6 @@ The container is created with bind mounts derived from the `filesystem` config p
 
 **Negative constraints:**
 - Missing mount sources: if an `ro` or `rw` path does not exist, the extension creates an empty directory at that path before `docker.createContainer`.
-
-### 5.4 Bash Execution Mapping
-
-The extension uses dockerode to create and start an exec inside the running container:
-
-```typescript
-const exec = await container.exec({
-  Cmd: ["sh", "-c", command],
-  WorkingDir: cwd ?? workspaceAbsolutePath,
-  AttachStdout: true,
-  AttachStderr: true,
-});
-const stream = await exec.start({ hijack: true, stdin: false });
-// Collect stdout/stderr from stream, then inspect exec for exit code.
-```
-
-- `cwd` defaults to the container's `WorkingDir`, which is set to `workspaceAbsolutePath` at creation.
-- The container's `$HOME` is set to the host user's home directory so tilde expansion matches the Guard.
-- Signal handling / timeout: UNDERSPECIFIED for v1. If the framework cancels the call, the behavior is best-effort.
-
-### 5.5 Output Truncation
-
-Tool results MUST be truncated to avoid overwhelming the LLM context. The limit is **2000 lines** and **50KB**, whichever is hit first.
-
-**Precondition:** `stdout` and `stderr` have been collected from the container exec.
-
-**Algorithm:**
-1. Concatenate `stdout` and `stderr` into `combinedOutput`.
-2. Apply `truncateTail(combinedOutput, { maxLines: 2000, maxBytes: 51200 })`. Rationale: for command output, the tail (most recent lines) is usually the most informative.
-3. Let `truncatedText` be the result of step 2.
-4. If truncation occurred, append to `truncatedText`:
-   ```
-   [Output truncated: {N} of {M} lines ({X} of {Y} bytes).]
-   ```
-5. Return `truncatedText` as `content[0].text`.
-
-**Postconditions:**
-- `content[0].text` does not exceed 2000 lines.
-- `content[0].text` does not exceed 50KB (excluding the truncation marker).
-- `details.stdout` and `details.stderr` contain the full, untruncated strings.
-- `details.exitCode` is preserved exactly.
-
-### 5.6 Examples
-
-**Example 1 — Happy path:**
-```
-Input:  bash({ command: "echo hello" })
-Output: { stdout: "hello\n", stderr: "", exitCode: 0 }
-```
-
-**Example 2 — Command failure:**
-```
-Input:  bash({ command: "exit 42" })
-Output: { stdout: "", stderr: "", exitCode: 42 }
-```
-
-**Example 3 — Container not running:**
-```
-Input:  bash({ command: "echo hello" })
-Output: { error: "Sandbox container not running" }
-```
-
-**Example 4 — Working directory outside mounts:**
-```
-Input:  bash({ command: "pwd", cwd: "/etc" })
-Output: { stderr: "... No such file or directory", exitCode: 1 }
-```
-
-**Example 5 — Output truncation:**
-```
-Input:  bash({ command: "seq 1 5000" })
-Result: content.text contains lines 3001–5000 plus truncation marker.
-        details.stdout contains all 5000 lines.
-        details.exitCode is 0.
-```
 
 ---
 
@@ -459,10 +370,9 @@ The following are explicitly deferred. v1 MUST compile and run without them.
 2. **Cache persistence.** Named volumes for package managers.
 3. **Symlink resolution.** Call `fs.realpathSync` before ACL evaluation. Specified in [DESIGN_EXTENSION.symlinks.md](DESIGN_EXTENSION.symlinks.md).
 4. **Mask / downgrade mounts.** VFS-level enforcement of read-only restrictions inside read-write trees.
-5. **Signal / timeout handling.** Kill `docker exec` processes on cancellation.
-6. **Custom capabilities.** `capabilities: string[]` in config.
-7. **Config reload.** Recreate container when `sandbox.json` changes and user calls /reload.
-8. **`/sandbox-reset` command.** A registered command that force-stops and removes the workspace sandbox container, clearing all refcount state. This recreates the container with the latest config on the next session start. It is also used to recover from leaked reference files after a crash. Specified in [DESIGN_EXTENSION.workspace-scoped.md](DESIGN_EXTENSION.workspace-scoped.md) §2.7.
+5. **Custom capabilities.** `capabilities: string[]` in config.
+6. **Config reload.** Recreate container when `sandbox.json` changes and user calls /reload.
+7. **`/sandbox-reset` command.** A registered command that force-stops and removes the workspace sandbox container, clearing all refcount state. This recreates the container with the latest config on the next session start. It is also used to recover from leaked reference files after a crash. Specified in [DESIGN_EXTENSION.workspace-scoped.md](DESIGN_EXTENSION.workspace-scoped.md) §2.7.
 
 ---
 

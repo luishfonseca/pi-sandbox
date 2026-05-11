@@ -1,6 +1,5 @@
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { createBashTool, isToolCallEventType, truncateTail, DEFAULT_MAX_LINES, DEFAULT_MAX_BYTES, formatSize } from "@mariozechner/pi-coding-agent";
-import { Type } from "@sinclair/typebox";
+import { createBashTool, isToolCallEventType } from "@mariozechner/pi-coding-agent";
 import { realpathSync, readdirSync } from "node:fs";
 import Dockerode from "dockerode";
 import { evaluateAccess, resolvePath, resolveSymlinks, type AccessOperation } from "./acl.js";
@@ -14,6 +13,7 @@ import {
   stopAndRemoveContainer,
   getContainerStatus,
 } from "./docker.js";
+import { bashSchema, createBashToolHandler } from "./bash.js";
 import {
   computeContainerName,
   computeConfigHash,
@@ -26,13 +26,6 @@ import {
   countLeakedRefs,
   resetState,
 } from "./lifecycle.js";
-
-const bashSchema = Type.Object({
-  command: Type.String({ description: "Bash command to execute" }),
-  timeout: Type.Optional(
-    Type.Number({ description: "Timeout in seconds (optional, no default timeout)" }),
-  ),
-});
 
 export interface SandboxExtensionOptions {
   docker?: Dockerode;
@@ -332,88 +325,16 @@ export function createSandboxExtension(options: SandboxExtensionOptions = {}): (
       label: "bash (sandboxed)",
       description: "Execute a command inside the sandbox container.",
       parameters: bashSchema,
-      async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-        if (pi.getFlag("no-sandbox")) {
-          return localBash.execute(_toolCallId, params, _signal, _onUpdate);
-        }
-
-        if (isPulling) {
-          return {
-            content: [
-              {
-                type: "text",
-                text: `Pulling sandbox image ${config?.image ?? "unknown"}...`,
-              },
-            ],
-            details: { error: "Image pull in progress" },
-            isError: true,
-          };
-        }
-        if (container === undefined || workspaceAbsolutePath === undefined) {
-          if (pullError) {
-            return {
-              content: [
-                {
-                  type: "text",
-                  text: `Failed to pull sandbox image: ${pullError}`,
-                },
-              ],
-              details: { error: pullError },
-              isError: true,
-            };
-          }
-          return {
-            content: [{ type: "text", text: "Sandbox container not running" }],
-            details: { error: "Sandbox container not running" },
-            isError: true,
-          };
-        }
-
-        const cwd = ctx.cwd;
-
-        try {
-          const info = await container.inspect();
-          if (!info.State.Running) {
-            return {
-              content: [{ type: "text", text: "Sandbox container not running" }],
-              details: { error: "Sandbox container not running" },
-              isError: true,
-            };
-          }
-
-          const result = await execInContainerFn(container, params.command, cwd);
-          const combinedOutput = result.stdout + (result.stderr ? result.stderr : "");
-          const truncation = truncateTail(combinedOutput, {
-            maxLines: DEFAULT_MAX_LINES,
-            maxBytes: DEFAULT_MAX_BYTES,
-          });
-          let text = truncation.content;
-          if (truncation.truncated) {
-            text += `\n\n[Output truncated: ${String(truncation.outputLines)} of ${String(truncation.totalLines)} lines (${formatSize(truncation.outputBytes)} of ${formatSize(truncation.totalBytes)}).]`;
-          }
-          if (!text) {
-            text = "(no output)";
-          }
-          return {
-            content: [{ type: "text", text }],
-            details: {
-              exitCode: result.exitCode,
-              stdout: result.stdout,
-              stderr: result.stderr,
-            },
-            isError: result.exitCode !== 0,
-          };
-        } catch (err) {
-          if (err instanceof DockerDaemonUnreachableError) {
-            return {
-              content: [{ type: "text", text: "Docker daemon unreachable" }],
-              details: { error: "Docker daemon unreachable" },
-              isError: true,
-            };
-          }
-          throw err;
-        }
-      },
+      execute: createBashToolHandler({
+        getNoSandbox: () => pi.getFlag("no-sandbox") as boolean,
+        localBash,
+        getIsPulling: () => isPulling,
+        getPullError: () => pullError,
+        getConfig: () => config,
+        getContainer: () => container,
+        getWorkspaceAbsolutePath: () => workspaceAbsolutePath,
+        execInContainerFn,
+      }),
     });
   };
 }

@@ -343,21 +343,58 @@ describeIntegration("execInContainer integration", () => {
   });
 
   it("returns stdout and exit code 0", async () => {
-    const result = await execInContainer(container, "echo hello");
+    const result = await execInContainer(container, { command: "echo hello", cwd: "/tmp" });
     assert.strictEqual(result.stdout.trim(), "hello");
     assert.strictEqual(result.stderr, "");
     assert.strictEqual(result.exitCode, 0);
+    assert.strictEqual(result.timedOut, false);
+    assert.strictEqual(result.aborted, false);
   });
 
   it("returns stderr and non-zero exit code", async () => {
-    const result = await execInContainer(container, "echo error >&2; exit 42");
+    const result = await execInContainer(container, { command: "echo error >&2; exit 42", cwd: "/tmp" });
     assert.strictEqual(result.stdout, "");
     assert.strictEqual(result.stderr.trim(), "error");
     assert.strictEqual(result.exitCode, 42);
+    assert.strictEqual(result.timedOut, false);
+    assert.strictEqual(result.aborted, false);
   });
 
   it("runs in provided cwd", async () => {
-    const result = await execInContainer(container, "pwd", "/tmp");
+    const result = await execInContainer(container, { command: "pwd", cwd: "/tmp" });
     assert.strictEqual(result.stdout.trim(), "/tmp");
+  });
+
+  it("times out a long-running command", async () => {
+    const result = await execInContainer(container, { command: "sleep 10", cwd: "/tmp", timeout: 1 });
+    assert.strictEqual(result.timedOut, true);
+    assert.strictEqual(result.aborted, false);
+    assert.strictEqual(result.exitCode, null);
+  });
+
+  it("aborts via AbortSignal", async () => {
+    const controller = new AbortController();
+    const promise = execInContainer(container, { command: "sleep 10", cwd: "/tmp", signal: controller.signal });
+    setTimeout(() => { controller.abort(); }, 500);
+    const result = await promise;
+    assert.strictEqual(result.aborted, true);
+    assert.strictEqual(result.timedOut, false);
+    assert.strictEqual(result.exitCode, null);
+  });
+
+  it("streams partial output via onUpdate", async () => {
+    const updates: string[] = [];
+    const result = await execInContainer(container, {
+      command: "for i in 1 2 3; do echo $i; done",
+      cwd: "/tmp",
+      onUpdate: (payload) => {
+        updates.push(payload.content[0]?.text ?? "");
+        return undefined;
+      },
+    });
+    assert.strictEqual(result.exitCode, 0);
+    assert.ok(updates.length >= 1, "expected at least one onUpdate call");
+    const lastUpdate = updates.at(-1);
+    assert.ok(lastUpdate?.includes("3"), "final update should include last line");
   });
 });

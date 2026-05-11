@@ -288,7 +288,7 @@ describe("createSandboxExtension", () => {
       loadConfigFn: () => ({ config, warnings: [] }),
       doesImageExistFn: () => Promise.resolve(true),
       ensureContainerFn: () => Promise.resolve({ container: mockContainer, created: true }),
-      execInContainerFn: () => Promise.resolve({ stdout: "hello", stderr: "", exitCode: 0 }),
+      execInContainerFn: () => Promise.resolve({ stdout: "hello", stderr: "", exitCode: 0, timedOut: false, aborted: false }),
     });
     ext(pi);
 
@@ -326,7 +326,7 @@ describe("createSandboxExtension", () => {
       loadConfigFn: () => ({ config, warnings: [] }),
       doesImageExistFn: () => Promise.resolve(true),
       ensureContainerFn: () => Promise.resolve({ container: mockContainer, created: true }),
-      execInContainerFn: () => Promise.resolve({ stdout: fullStdout, stderr: "", exitCode: 0 }),
+      execInContainerFn: () => Promise.resolve({ stdout: fullStdout, stderr: "", exitCode: 0, timedOut: false, aborted: false }),
     });
     ext(pi);
 
@@ -357,6 +357,145 @@ describe("createSandboxExtension", () => {
     assert.strictEqual(result.details.stdout, fullStdout);
     assert.strictEqual(result.details.stderr, "");
     assert.strictEqual(result.details.exitCode, 0);
+  });
+
+  it("returns timeout error when command times out", async () => {
+    const config: SandboxConfig = { image: "alpine", env: {}, filesystem: { rw: [], ro: [] } };
+    const pi = createMockPi();
+    const mockContainer = {
+      inspect: () => Promise.resolve({ State: { Running: true } }),
+    } as unknown as Container;
+
+    const ext = createSandboxExtension({
+      loadConfigFn: () => ({ config, warnings: [] }),
+      doesImageExistFn: () => Promise.resolve(true),
+      ensureContainerFn: () => Promise.resolve({ container: mockContainer, created: true }),
+      execInContainerFn: () => Promise.resolve({ stdout: "", stderr: "", exitCode: null, timedOut: true, aborted: false }),
+    });
+    ext(pi);
+
+    const ctx = createMockCtx(tmpDir);
+    await getHandler(pi, "session_start")({}, ctx);
+
+    const bashTool = getFirstTool(pi);
+    const result = (await bashTool.execute(
+      "call-1",
+      { command: "sleep 60", timeout: 1 },
+      undefined,
+      undefined,
+      ctx,
+    )) as { isError: boolean; content: { text: string }[]; details: { exitCode: null; stdout: string; stderr: string } };
+    assert.strictEqual(result.isError, true);
+    const firstContent = result.content[0];
+    if (firstContent === undefined) {
+      throw new Error("Missing content item");
+    }
+    assert.ok(firstContent.text.includes("Command timed out after 1 seconds"));
+    assert.strictEqual(result.details.exitCode, null);
+    assert.strictEqual(result.details.stdout, "");
+    assert.strictEqual(result.details.stderr, "");
+  });
+
+  it("returns abort error when signal is aborted", async () => {
+    const config: SandboxConfig = { image: "alpine", env: {}, filesystem: { rw: [], ro: [] } };
+    const pi = createMockPi();
+    const mockContainer = {
+      inspect: () => Promise.resolve({ State: { Running: true } }),
+    } as unknown as Container;
+
+    const ext = createSandboxExtension({
+      loadConfigFn: () => ({ config, warnings: [] }),
+      doesImageExistFn: () => Promise.resolve(true),
+      ensureContainerFn: () => Promise.resolve({ container: mockContainer, created: true }),
+      execInContainerFn: () => Promise.resolve({ stdout: "partial", stderr: "", exitCode: null, timedOut: false, aborted: true }),
+    });
+    ext(pi);
+
+    const ctx = createMockCtx(tmpDir);
+    await getHandler(pi, "session_start")({}, ctx);
+
+    const bashTool = getFirstTool(pi);
+    const controller = new AbortController();
+    controller.abort();
+    const result = (await bashTool.execute(
+      "call-1",
+      { command: "sleep 60" },
+      controller.signal,
+      undefined,
+      ctx,
+    )) as { isError: boolean; content: { text: string }[]; details: { exitCode: null; stdout: string; stderr: string } };
+    assert.strictEqual(result.isError, true);
+    const firstContent = result.content[0];
+    if (firstContent === undefined) {
+      throw new Error("Missing content item");
+    }
+    assert.ok(firstContent.text.includes("Command aborted"));
+    assert.strictEqual(result.details.exitCode, null);
+    assert.strictEqual(result.details.stdout, "partial");
+  });
+
+  it("appends exit code message for non-zero exit", async () => {
+    const config: SandboxConfig = { image: "alpine", env: {}, filesystem: { rw: [], ro: [] } };
+    const pi = createMockPi();
+    const mockContainer = {
+      inspect: () => Promise.resolve({ State: { Running: true } }),
+    } as unknown as Container;
+
+    const ext = createSandboxExtension({
+      loadConfigFn: () => ({ config, warnings: [] }),
+      doesImageExistFn: () => Promise.resolve(true),
+      ensureContainerFn: () => Promise.resolve({ container: mockContainer, created: true }),
+      execInContainerFn: () => Promise.resolve({ stdout: "", stderr: "", exitCode: 42, timedOut: false, aborted: false }),
+    });
+    ext(pi);
+
+    const ctx = createMockCtx(tmpDir);
+    await getHandler(pi, "session_start")({}, ctx);
+
+    const bashTool = getFirstTool(pi);
+    const result = (await bashTool.execute(
+      "call-1",
+      { command: "exit 42" },
+      undefined,
+      undefined,
+      ctx,
+    )) as { isError: boolean; content: { text: string }[] };
+    assert.strictEqual(result.isError, true);
+    const firstContent = result.content[0];
+    if (firstContent === undefined) {
+      throw new Error("Missing content item");
+    }
+    assert.ok(firstContent.text.includes("Command exited with code 42"));
+  });
+
+  it("treats timeout <= 0 as absent", async () => {
+    const config: SandboxConfig = { image: "alpine", env: {}, filesystem: { rw: [], ro: [] } };
+    const pi = createMockPi();
+    const mockContainer = {
+      inspect: () => Promise.resolve({ State: { Running: true } }),
+    } as unknown as Container;
+
+    let receivedTimeout: number | undefined = "should-not-be-this" as unknown as number;
+    const ext = createSandboxExtension({
+      loadConfigFn: () => ({ config, warnings: [] }),
+      doesImageExistFn: () => Promise.resolve(true),
+      ensureContainerFn: () => Promise.resolve({ container: mockContainer, created: true }),
+      execInContainerFn: (_container, options) => {
+        receivedTimeout = options.timeout;
+        return Promise.resolve({ stdout: "", stderr: "", exitCode: 0, timedOut: false, aborted: false });
+      },
+    });
+    ext(pi);
+
+    const ctx = createMockCtx(tmpDir);
+    await getHandler(pi, "session_start")({}, ctx);
+
+    const bashTool = getFirstTool(pi);
+    await bashTool.execute("call-1", { command: "echo hi", timeout: 0 }, undefined, undefined, ctx);
+    assert.strictEqual(receivedTimeout, undefined);
+
+    await bashTool.execute("call-2", { command: "echo hi", timeout: -1 }, undefined, undefined, ctx);
+    assert.strictEqual(receivedTimeout, undefined);
   });
 
   it("returns pull in progress error when image is missing", async () => {
