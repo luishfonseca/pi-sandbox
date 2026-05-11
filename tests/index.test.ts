@@ -42,7 +42,10 @@ function createMockPi(): MockPi {
   return pi;
 }
 
-function createMockCtx(cwd: string): ExtensionContext {
+function createMockCtx(
+  cwd: string,
+  notifications?: { message: string; type: string }[],
+): ExtensionContext {
   return {
     cwd,
     hasUI: false,
@@ -54,7 +57,9 @@ function createMockCtx(cwd: string): ExtensionContext {
       getLeafId: () => "",
     },
     ui: {
-      notify: () => undefined,
+      notify: (message: string, type: string) => {
+        notifications?.push({ message, type });
+      },
       confirm: () => Promise.resolve(false),
       select: () => Promise.resolve(undefined),
       input: () => Promise.resolve(undefined),
@@ -142,7 +147,7 @@ describe("createSandboxExtension", () => {
     } as unknown as Container;
 
     const ext = createSandboxExtension({
-      loadConfigFn: () => config,
+      loadConfigFn: () => ({ config, warnings: [] }),
       doesImageExistFn: () => Promise.resolve(true),
       ensureContainerFn: () => Promise.resolve(mockContainer),
     });
@@ -166,7 +171,7 @@ describe("createSandboxExtension", () => {
     } as unknown as Container;
 
     const ext = createSandboxExtension({
-      loadConfigFn: () => config,
+      loadConfigFn: () => ({ config, warnings: [] }),
       doesImageExistFn: () => Promise.resolve(true),
       ensureContainerFn: () => Promise.resolve(mockContainer),
     });
@@ -210,7 +215,7 @@ describe("createSandboxExtension", () => {
     } as unknown as Container;
 
     const ext = createSandboxExtension({
-      loadConfigFn: () => config,
+      loadConfigFn: () => ({ config, warnings: [] }),
       doesImageExistFn: () => Promise.resolve(true),
       ensureContainerFn: () => Promise.resolve(mockContainer),
       execInContainerFn: () => Promise.resolve({ stdout: "hello", stderr: "", exitCode: 0 }),
@@ -247,7 +252,7 @@ describe("createSandboxExtension", () => {
     });
 
     const ext = createSandboxExtension({
-      loadConfigFn: () => config,
+      loadConfigFn: () => ({ config, warnings: [] }),
       doesImageExistFn: () => Promise.resolve(false),
       pullImageFn: () => pullPromise,
       ensureContainerFn: () => Promise.resolve({} as Container),
@@ -280,7 +285,7 @@ describe("createSandboxExtension", () => {
     const pi = createMockPi();
 
     const ext = createSandboxExtension({
-      loadConfigFn: () => config,
+      loadConfigFn: () => ({ config, warnings: [] }),
       doesImageExistFn: () => Promise.resolve(false),
       pullImageFn: () => Promise.reject(new Error("network timeout")),
       ensureContainerFn: () => Promise.resolve({} as Container),
@@ -316,7 +321,7 @@ describe("createSandboxExtension", () => {
     } as unknown as Container;
 
     const ext = createSandboxExtension({
-      loadConfigFn: () => config,
+      loadConfigFn: () => ({ config, warnings: [] }),
       doesImageExistFn: () => Promise.resolve(true),
       ensureContainerFn: () => Promise.resolve(mockContainer),
     });
@@ -345,7 +350,7 @@ describe("createSandboxExtension", () => {
     } as unknown as Container;
 
     const ext = createSandboxExtension({
-      loadConfigFn: () => config,
+      loadConfigFn: () => ({ config, warnings: [] }),
       doesImageExistFn: () => Promise.resolve(true),
       ensureContainerFn: () => Promise.resolve(mockContainer),
     });
@@ -372,7 +377,7 @@ describe("createSandboxExtension", () => {
     } as unknown as Container;
 
     const ext = createSandboxExtension({
-      loadConfigFn: () => config,
+      loadConfigFn: () => ({ config, warnings: [] }),
       doesImageExistFn: () => Promise.resolve(true),
       ensureContainerFn: () => Promise.resolve(mockContainer),
     });
@@ -392,5 +397,101 @@ describe("createSandboxExtension", () => {
     assert.deepStrictEqual(result, { block: true, reason: `Path outside workspace: ${join(tmpDir, "secret")}` });
 
     rmSync(externalDir, { recursive: true, force: true });
+  });
+
+  it("Guard allows read to path under PI_PACKAGE_DIR after augmentation", async () => {
+    const originalPiDir = process.env.PI_PACKAGE_DIR;
+    process.env.PI_PACKAGE_DIR = "/nix/store/abc/pi-monorepo";
+    const config: SandboxConfig = { image: "alpine", env: {}, filesystem: { rw: [], ro: [] } };
+    const pi = createMockPi();
+    const mockContainer = {
+      inspect: () => Promise.resolve({ State: { Running: true } }),
+    } as unknown as Container;
+
+    const ext = createSandboxExtension({
+      loadConfigFn: () => ({ config, warnings: [] }),
+      doesImageExistFn: () => Promise.resolve(true),
+      ensureContainerFn: () => Promise.resolve(mockContainer),
+    });
+    ext(pi);
+
+    const ctx = createMockCtx(tmpDir);
+    await getHandler(pi, "session_start")({}, ctx);
+
+    if (originalPiDir === undefined) {
+      delete process.env.PI_PACKAGE_DIR;
+    } else {
+      process.env.PI_PACKAGE_DIR = originalPiDir;
+    }
+
+    const result = await getHandler(pi, "tool_call")(
+      { toolName: "read", input: { path: "/nix/store/abc/pi-monorepo/docs/extensions.md" } },
+      ctx,
+    );
+    assert.strictEqual(result, undefined);
+  });
+
+  it("presents config warnings via ctx.ui.notify", async () => {
+    const originalPiDir = process.env.PI_PACKAGE_DIR;
+    process.env.PI_PACKAGE_DIR = "/nix/store/abc/pi-monorepo";
+    const config: SandboxConfig = { image: "alpine", env: {}, filesystem: { rw: [], ro: [] } };
+    const pi = createMockPi();
+    const mockContainer = {
+      inspect: () => Promise.resolve({ State: { Running: true } }),
+    } as unknown as Container;
+
+    const notifications: { message: string; type: string }[] = [];
+    const ext = createSandboxExtension({
+      loadConfigFn: () => ({ config, warnings: ["Unknown key \"foo\"", "Invalid JSON"] }),
+      doesImageExistFn: () => Promise.resolve(true),
+      ensureContainerFn: () => Promise.resolve(mockContainer),
+    });
+    ext(pi);
+
+    const ctx = createMockCtx(tmpDir, notifications);
+    await getHandler(pi, "session_start")({}, ctx);
+
+    if (originalPiDir === undefined) {
+      delete process.env.PI_PACKAGE_DIR;
+    } else {
+      process.env.PI_PACKAGE_DIR = originalPiDir;
+    }
+
+    assert.strictEqual(notifications.length, 2);
+    assert.ok(notifications[0]?.message.includes("Unknown key"));
+    assert.strictEqual(notifications[0]?.type, "warning");
+    assert.ok(notifications[1]?.message.includes("Invalid JSON"));
+    assert.strictEqual(notifications[1]?.type, "warning");
+  });
+
+  it("presents warning notification when PI_PACKAGE_DIR is not set", async () => {
+    const originalPiDir = process.env.PI_PACKAGE_DIR;
+    delete process.env.PI_PACKAGE_DIR;
+    const config: SandboxConfig = { image: "alpine", env: {}, filesystem: { rw: [], ro: [] } };
+    const pi = createMockPi();
+    const mockContainer = {
+      inspect: () => Promise.resolve({ State: { Running: true } }),
+    } as unknown as Container;
+
+    const ext = createSandboxExtension({
+      loadConfigFn: () => ({ config, warnings: [] }),
+      doesImageExistFn: () => Promise.resolve(true),
+      ensureContainerFn: () => Promise.resolve(mockContainer),
+    });
+    ext(pi);
+
+    const notifications: { message: string; type: string }[] = [];
+    const ctx = createMockCtx(tmpDir, notifications);
+    await getHandler(pi, "session_start")({}, ctx);
+
+    if (originalPiDir === undefined) {
+      delete process.env.PI_PACKAGE_DIR;
+    } else {
+      process.env.PI_PACKAGE_DIR = originalPiDir;
+    }
+
+    assert.strictEqual(notifications.length, 1);
+    assert.ok(notifications[0]?.message.includes("PI_PACKAGE_DIR is not set"));
+    assert.strictEqual(notifications[0]?.type, "warning");
   });
 });

@@ -24,6 +24,7 @@ This is `pi-sandbox`, a Pi extension. See `spec/DESIGN.md` for the full behavior
 - **Explicit over implicit.** Ban magic: reflection, auto-wiring, implicit imports, convention routing, implicit ORM, metaprogramming, global mutable state.
 - **Flat graphs, shallow stacks.** Composition over inheritance. Unidirectional data flow. Avoid global event buses, bidirectional reactive state, deeply nested observers.
 - **Schema-first.** Define APIs and data models with explicit schemas before implementation.
+- **Split business logic from presentation.** Domain rules, state transitions, and orchestration must not depend on UI frameworks, rendering, or view state. Presentation layers adapt to the core; the core remains framework-agnostic.
 - **Vertical slices.** End-to-end features (schema → API → handler → test), independently verifiable.
 - **Boring patterns.** Mainstream abstractions only. Avoid niche DSLs, custom meta-frameworks, bleeding-edge libraries.
 
@@ -37,3 +38,8 @@ This is `pi-sandbox`, a Pi extension. See `spec/DESIGN.md` for the full behavior
 - **Dependency hygiene.** Prefer standard library. Wrap third-party libs behind thin internal interfaces. Pin versions.
 - **Comments explain why, not what.** Delete comments that narrate syntax.
 - **Observability and defense.** Log at major branches and state changes with correlation IDs. Sanitize and validate all external inputs.
+
+## Lessons Learned
+
+- **Use `ctx.ui.notify()` instead of `console.*` for user-facing messages.**
+  Pi is a TUI application; raw `console.log` / `console.warn` / `console.error` bypass the terminal UI layer and can corrupt the screen, produce invisible output, or interfere with TUI rendering. `ctx.ui.notify(message, severity)` integrates with the Pi message area, rendering notifications properly themed and visible to the user. Severity levels include `"info"`, `"success"`, `"warning"`, and `"error"`. Reserve `console.*` for local debugging or development-only diagnostics, never for warnings or errors the user needs to see.

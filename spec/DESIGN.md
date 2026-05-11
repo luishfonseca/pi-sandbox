@@ -288,6 +288,8 @@ Output: { stderr: "... No such file or directory", exitCode: 1 }
 **Precondition:** Docker daemon is reachable.  
 **Postcondition:** The sandbox container is running (or image pull is in progress), and the current session is registered as a user of the workspace-scoped container.
 
+**Config augmentation.** Before the container is created, the merged `filesystem` configuration MAY be augmented at runtime with the Pi package directory so that the model can read pi documentation paths referenced in the system prompt. See [DESIGN_EXTENSION.pi-docs-access.md](DESIGN_EXTENSION.pi-docs-access.md).
+
 The full session start algorithm — including container naming, refcount acquisition, config hash computation, and staleness detection — is specified in [DESIGN_EXTENSION.workspace-scoped.md](DESIGN_EXTENSION.workspace-scoped.md) §2.
 
 ### 6.2 Session Shutdown

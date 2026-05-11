@@ -4,7 +4,7 @@ import { Type } from "@sinclair/typebox";
 import { realpathSync } from "node:fs";
 import Dockerode from "dockerode";
 import { evaluateAccess, resolvePath, resolveSymlinks, type AccessOperation } from "./acl.js";
-import { loadConfig, type SandboxConfig } from "./config.js";
+import { loadConfig, validateConfig, augmentConfigWithPiDir, type SandboxConfig } from "./config.js";
 import {
   ensureContainer,
   execInContainer,
@@ -62,7 +62,15 @@ export function createSandboxExtension(options: SandboxExtensionOptions = {}): (
         return;
       }
 
-      const loadedConfig = loadConfigFn(ctx.cwd);
+      const { config: loadedConfig, warnings } = loadConfigFn(ctx.cwd);
+      for (const warning of warnings) {
+        ctx.ui.notify(warning, "warning");
+      }
+      const augmentResult = augmentConfigWithPiDir(loadedConfig);
+      if (augmentResult.warning) {
+        ctx.ui.notify(augmentResult.warning, "warning");
+      }
+      validateConfig(loadedConfig);
       const workspacePath = realpathSync(ctx.cwd);
       const containerName = `pi-sandbox-${ctx.sessionManager.getSessionId()}`;
 
