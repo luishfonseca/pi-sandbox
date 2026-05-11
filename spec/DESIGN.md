@@ -207,8 +207,9 @@ The extension overrides the built-in `bash` tool. Every `bash` tool call is exec
 
 **Postconditions:**
 1. The command executes as a new process inside the container.
-2. `stdout` and `stderr` are streamed back exactly as received.
-3. The exit code is returned.
+2. `stdout` and `stderr` are collected from the stream.
+3. The combined output is truncated per §5.5 before being returned in `content`. `details` retains the full, untruncated strings.
+4. The exit code is returned.
 
 **Error conditions:**
 - Container not running → return `{ error: "Sandbox container not running" }`
@@ -253,7 +254,29 @@ const stream = await exec.start({ hijack: true, stdin: false });
 - The container's `$HOME` is set to the host user's home directory so tilde expansion matches the Guard.
 - Signal handling / timeout: UNDERSPECIFIED for v1. If the framework cancels the call, the behavior is best-effort.
 
-### 5.5 Examples
+### 5.5 Output Truncation
+
+Tool results MUST be truncated to avoid overwhelming the LLM context. The limit is **2000 lines** and **50KB**, whichever is hit first.
+
+**Precondition:** `stdout` and `stderr` have been collected from the container exec.
+
+**Algorithm:**
+1. Concatenate `stdout` and `stderr` into `combinedOutput`.
+2. Apply `truncateTail(combinedOutput, { maxLines: 2000, maxBytes: 51200 })`. Rationale: for command output, the tail (most recent lines) is usually the most informative.
+3. Let `truncatedText` be the result of step 2.
+4. If truncation occurred, append to `truncatedText`:
+   ```
+   [Output truncated: {N} of {M} lines ({X} of {Y} bytes).]
+   ```
+5. Return `truncatedText` as `content[0].text`.
+
+**Postconditions:**
+- `content[0].text` does not exceed 2000 lines.
+- `content[0].text` does not exceed 50KB (excluding the truncation marker).
+- `details.stdout` and `details.stderr` contain the full, untruncated strings.
+- `details.exitCode` is preserved exactly.
+
+### 5.6 Examples
 
 **Example 1 — Happy path:**
 ```
@@ -279,6 +302,14 @@ Input:  bash({ command: "pwd", cwd: "/etc" })
 Output: { stderr: "... No such file or directory", exitCode: 1 }
 ```
 
+**Example 5 — Output truncation:**
+```
+Input:  bash({ command: "seq 1 5000" })
+Result: content.text contains lines 3001–5000 plus truncation marker.
+        details.stdout contains all 5000 lines.
+        details.exitCode is 0.
+```
+
 ---
 
 ## 6. Container Lifecycle
@@ -297,7 +328,7 @@ The full session start algorithm — including container naming, refcount acquis
 **Triggered by:** `session_shutdown` event.  
 **Postcondition:** The session's reference file is removed. If no references remain, the container is stopped and removed.
 
-See [DESIGN_EXTENSION.workspace-scoped.md](DESIGN_EXTENSION.workspace-scoped.md) §2.5 for the shutdown algorithm and §2.7 for the `/prune-sandbox` recovery command.
+See [DESIGN_EXTENSION.workspace-scoped.md](DESIGN_EXTENSION.workspace-scoped.md) §2.5 for the shutdown algorithm and §2.7 for the `/sandbox-reset` recovery command.
 
 ---
 
@@ -318,7 +349,109 @@ See [DESIGN_EXTENSION.workspace-scoped.md](DESIGN_EXTENSION.workspace-scoped.md)
 
 ---
 
-## 8. Extension Points
+## 8. /sandbox-status Command
+
+### 8.1 Overview
+
+The extension registers a `/sandbox-status` command that displays a read-only summary of the sandbox state for the current workspace. It aggregates information from the configuration (§3), filesystem rules (§4), container runtime (§5–§6), and security settings (§7).
+
+### 8.2 Command Registration
+
+**Registered as:** `pi.registerCommand("sandbox-status", { ... })`  
+**Description:** Display the current sandbox state for the workspace.
+
+### 8.3 Handler Behavior
+
+**Precondition:** None. The command MAY be invoked at any time.  
+**Postcondition:** A status report is presented to the user via `ctx.ui.notify`.
+
+```
+1. If --no-sandbox is active:
+   Notify: "Sandbox status: disabled (--no-sandbox is set)."
+   Return.
+
+2. Compute workspacePath ← fs.realpathSync(ctx.cwd).
+3. Compute containerName ← computeContainerName(workspacePath) (§5.2).
+4. Compute stateDir ← getStateDir(ctx.sessionManager.getSessionDir()) (§6.2).
+5. Load effective config:
+   a. { config: loadedConfig } ← loadConfig(ctx.cwd) (§3.3).
+   b. augmentConfigWithPiDir(loadedConfig) (§6.1).
+6. Compute configHash ← computeConfigHash(loadedConfig)
+   ([DESIGN_EXTENSION.workspace-scoped.md](DESIGN_EXTENSION.workspace-scoped.md) §2.3).
+7. Read storedHash ← readStoredConfigHash(stateDir) if stateDir exists.
+8. Query Docker for container named containerName:
+   - If found and running: status = "running"
+   - If found but not running: status = "stopped"
+   - If not found: status = "not found"
+   - If Docker unreachable: surface error.
+9. Read sessionRefs ← list of filenames in `${stateDir}/sessions/` if directory exists.
+10. Assemble and notify status report.
+```
+
+### 8.4 Status Report Fields
+
+The report MUST include:
+
+| Field | Source | Description |
+|---|---|---|
+| `mode` | `--no-sandbox` flag | `sandboxed` or `disabled` |
+| `workspace` | `ctx.cwd` | Absolute workspace path |
+| `containerName` | §5.2 | Derived container name |
+| `containerStatus` | Docker inspect | `running`, `stopped`, or `not found` |
+| `image` | Merged config (§3.2) | Effective Docker image |
+| `configHash` | [DESIGN_EXTENSION.workspace-scoped.md](DESIGN_EXTENSION.workspace-scoped.md) §2.3 | Current effective config hash |
+| `configStaleness` | [DESIGN_EXTENSION.workspace-scoped.md](DESIGN_EXTENSION.workspace-scoped.md) §2.6 | `current`, `stale`, or `unknown` |
+| `filesystem.rw` | Merged config (§3.2) | Read-write path prefixes |
+| `filesystem.ro` | Merged config (§3.2) | Read-only path prefixes |
+| `sessions.active` | §6.2 | Count of active session reference files |
+| `sessions.ids` | §6.2 | List of active session IDs (up to 10) |
+
+The report MUST NOT include:
+- Environment variable values (only keys, to avoid leaking secrets).
+- Contents of blocked tool calls (the Guard does not retain history).
+
+### 8.5 Examples
+
+**Example 1 — Active sandbox:**
+```
+Input:  /sandbox-status
+Output (notified):
+  Sandbox status:
+  Workspace: /home/user/project
+  Container: pi-sandbox-a1b2c3d4 (running)
+  Image: ubuntu:22.04
+  Config hash: 7f8e9d2a (current)
+  Filesystem:
+    rw: /home/user/project, /tmp/shared
+    ro: /nix/store/…/pi-monorepo
+  Sessions: 2 active (abc123, def456)
+```
+
+**Example 2 — Stale config:**
+```
+Input:  /sandbox-status
+Output:
+  Config hash: 7f8e9d2a (stale — running container was created with a1b2c3d4)
+```
+
+**Example 3 — Disabled:**
+```
+Input:  /sandbox-status
+Output: "Sandbox status: disabled (--no-sandbox is set)."
+```
+
+**Example 4 — No state:**
+```
+Input:  /sandbox-status
+Output:
+  Container: pi-sandbox-a1b2c3d4 (not found)
+  Sessions: 0 active
+  Config hash: 7f8e9d2a (unknown)
+```
+
+---
+
+## 9. Extension Points
 
 The following are explicitly deferred. v1 MUST compile and run without them.
 
@@ -329,11 +462,11 @@ The following are explicitly deferred. v1 MUST compile and run without them.
 5. **Signal / timeout handling.** Kill `docker exec` processes on cancellation.
 6. **Custom capabilities.** `capabilities: string[]` in config.
 7. **Config reload.** Recreate container when `sandbox.json` changes and user calls /reload.
-8. **`/prune-sandbox` command.** A registered command that force-stops and removes the workspace sandbox container, clearing all refcount state. This recreates the container with the latest config on the next session start. It is also used to recover from leaked reference files after a crash. Specified in [DESIGN_EXTENSION.workspace-scoped.md](DESIGN_EXTENSION.workspace-scoped.md) §2.7.
+8. **`/sandbox-reset` command.** A registered command that force-stops and removes the workspace sandbox container, clearing all refcount state. This recreates the container with the latest config on the next session start. It is also used to recover from leaked reference files after a crash. Specified in [DESIGN_EXTENSION.workspace-scoped.md](DESIGN_EXTENSION.workspace-scoped.md) §2.7.
 
 ---
 
-## 9. Related Work
+## 10. Related Work
 
 - [Pi bubblewrap sandbox example](https://github.com/marioech/pi-coding-agent/tree/main/examples/extensions/sandbox)
 - [Pi protected-paths example](https://github.com/marioech/pi-coding-agent/tree/main/examples/extensions/protected-paths.ts)

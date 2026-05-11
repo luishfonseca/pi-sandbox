@@ -148,6 +148,8 @@ Result:  BLOCK — reason: "Symlink loop detected: /a/file"
 | Symlink bypass in Guard | Accepted limitation | Closed |
 | Information leakage via error | N/A | Block reasons use original path, not resolved target |
 
+Symlink resolution is reported as `enabled` in `/sandbox-status`.
+
 ---
 
 ## 6. Integration

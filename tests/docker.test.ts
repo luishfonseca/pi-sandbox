@@ -12,6 +12,7 @@ import {
   execInContainer,
   doesImageExist,
   pullImage,
+  stopAndRemoveContainer,
 } from "../src/docker.js";
 import type { FilesystemConfig, SandboxConfig } from "../src/config.js";
 
@@ -92,7 +93,7 @@ describeIntegration("ensureContainer integration", () => {
       env: {},
       filesystem: { rw: [], ro: [] },
     };
-    const container = await ensureContainer(docker, config, tmp, containerName);
+    const { container } = await ensureContainer(docker, config, tmp, containerName);
     const info = await container.inspect();
     assert.strictEqual(info.State.Running, true);
     assert.strictEqual(info.Name, `/${containerName}`);
@@ -106,8 +107,8 @@ describeIntegration("ensureContainer integration", () => {
       env: {},
       filesystem: { rw: [], ro: [] },
     };
-    const first = await ensureContainer(docker, config, tmp, containerName);
-    const second = await ensureContainer(docker, config, tmp, containerName);
+    const { container: first } = await ensureContainer(docker, config, tmp, containerName);
+    const { container: second } = await ensureContainer(docker, config, tmp, containerName);
     const secondInfo = await second.inspect();
     assert.strictEqual(first.id, secondInfo.Id);
     rmSync(tmp, { recursive: true, force: true });
@@ -120,9 +121,9 @@ describeIntegration("ensureContainer integration", () => {
       env: {},
       filesystem: { rw: [], ro: [] },
     };
-    const container = await ensureContainer(docker, config, tmp, containerName);
+    const { container } = await ensureContainer(docker, config, tmp, containerName);
     await container.stop({ t: 1 });
-    const restarted = await ensureContainer(docker, config, tmp, containerName);
+    const { container: restarted } = await ensureContainer(docker, config, tmp, containerName);
     const info = await restarted.inspect();
     assert.strictEqual(info.State.Running, true);
     rmSync(tmp, { recursive: true, force: true });
@@ -212,6 +213,116 @@ describe("pullImage", () => {
   });
 });
 
+describe("stopAndRemoveContainer", () => {
+  it("resolves when container does not exist", async () => {
+    const docker = {
+      getContainer: (): {
+        stop: () => Promise<never>;
+        remove: () => Promise<never>;
+      } => ({
+        stop: (): Promise<never> => Promise.reject(Object.assign(new Error("not found"), { statusCode: 404 })),
+        remove: (): Promise<never> => Promise.reject(Object.assign(new Error("not found"), { statusCode: 404 })),
+      }),
+    } as unknown as Dockerode;
+    await stopAndRemoveContainer(docker, "missing");
+  });
+
+  it("stops and removes an existing container", async () => {
+    let stopped = false;
+    let removed = false;
+    const docker = {
+      getContainer: (): {
+        stop: () => Promise<void>;
+        remove: () => Promise<void>;
+      } => ({
+        stop: (): Promise<void> => { stopped = true; return Promise.resolve(); },
+        remove: (): Promise<void> => { removed = true; return Promise.resolve(); },
+      }),
+    } as unknown as Dockerode;
+    await stopAndRemoveContainer(docker, "existing");
+    assert.strictEqual(stopped, true);
+    assert.strictEqual(removed, true);
+  });
+
+  it("throws DockerDaemonUnreachableError on connection error", async () => {
+    const docker = {
+      getContainer: (): {
+        stop: () => Promise<never>;
+      } => ({
+        stop: (): Promise<never> => Promise.reject(new Error("ECONNREFUSED")),
+      }),
+    } as unknown as Dockerode;
+    await assert.rejects(() => stopAndRemoveContainer(docker, "foo"), /Docker daemon unreachable/);
+  });
+
+  it("removes container even when stop throws a benign error", async () => {
+    let removed = false;
+    const docker = {
+      getContainer: (): {
+        stop: () => Promise<never>;
+        remove: () => Promise<void>;
+      } => ({
+        stop: (): Promise<never> => Promise.reject(new Error("Container already stopped")),
+        remove: (): Promise<void> => { removed = true; return Promise.resolve(); },
+      }),
+    } as unknown as Dockerode;
+    await stopAndRemoveContainer(docker, "already-stopped");
+    assert.strictEqual(removed, true);
+  });
+});
+
+describe("ensureContainer name conflict", () => {
+  it("reuses container when create throws 409", async () => {
+    let inspectCalls = 0;
+    const docker = {
+      getContainer: (_name: string): {
+        inspect: () => Promise<{ State: { Running: boolean } }>;
+        start: () => Promise<void>;
+      } => ({
+        inspect: (): Promise<{ State: { Running: boolean } }> => {
+          inspectCalls++;
+          return Promise.resolve({ State: { Running: true } });
+        },
+        start: (): Promise<void> => Promise.resolve(),
+      }),
+      createContainer: (): Promise<never> => Promise.reject(Object.assign(new Error("conflict"), { statusCode: 409 })),
+    } as unknown as Dockerode;
+
+    const config: SandboxConfig = {
+      image: "alpine",
+      env: {},
+      filesystem: { rw: [], ro: [] },
+    };
+    const { container } = await ensureContainer(docker, config, "/workspace", "test-conflict");
+    const info = await container.inspect();
+    assert.strictEqual(info.State.Running, true);
+    assert.strictEqual(inspectCalls, 2);
+  });
+
+  it("throws raw error when create 409 is followed by inspect 404", async () => {
+    const docker = {
+      getContainer: (_name: string): {
+        inspect: () => Promise<never>;
+        start: () => Promise<void>;
+      } => ({
+        inspect: (): Promise<never> => Promise.reject(Object.assign(new Error("not found"), { statusCode: 404 })),
+        start: (): Promise<void> => Promise.resolve(),
+      }),
+      createContainer: (): Promise<never> => Promise.reject(Object.assign(new Error("conflict"), { statusCode: 409 })),
+    } as unknown as Dockerode;
+
+    const config: SandboxConfig = {
+      image: "alpine",
+      env: {},
+      filesystem: { rw: [], ro: [] },
+    };
+    await assert.rejects(
+      () => ensureContainer(docker, config, "/workspace", "test-conflict-vanished"),
+      /not found/,
+    );
+  });
+});
+
 describeIntegration("execInContainer integration", () => {
   let containerName: string;
   let container: Dockerode.Container;
@@ -224,7 +335,7 @@ describeIntegration("execInContainer integration", () => {
       env: {},
       filesystem: { rw: [], ro: [] },
     };
-    container = await ensureContainer(docker, config, tmp, containerName);
+    container = (await ensureContainer(docker, config, tmp, containerName)).container;
   });
 
   afterEach(async () => {

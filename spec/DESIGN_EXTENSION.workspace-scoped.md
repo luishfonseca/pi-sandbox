@@ -1,6 +1,6 @@
 # Design Extension: Workspace-Scoped Containers with Refcounting
 
-Extends [DESIGN.md §5.2](DESIGN.md#52-container-naming), [§6.1](DESIGN.md#61-session-start), [§6.2](DESIGN.md#62-session-shutdown), and replaces extension point 8 in [§8](DESIGN.md#8-extension-points).
+Extends [DESIGN.md §5.2](DESIGN.md#52-container-naming), [§6.1](DESIGN.md#61-session-start), [§6.2](DESIGN.md#62-session-shutdown), and replaces extension point 8 in [§9](DESIGN.md#9-extension-points).
 
 ## 1. Overview
 
@@ -38,6 +38,8 @@ Subdirectories:
 
 **Precondition:** The extension may create `stateDir` and its subdirectories recursively.
 
+This directory is read by `/sandbox-status` to report session counts and the running container's config hash.
+
 ### 2.3 Config Hash
 
 ```
@@ -64,7 +66,7 @@ The hash covers the effective merged config (§3.3). It is computed during sessi
    - If a container with containerName exists and is running:
      * Read `${stateDir}/config-hash`. If it differs from configHash,
        emit a warning via ctx.ui.notify:
-       "Sandbox config has changed. Run /prune-sandbox to recreate."
+       "Sandbox config has changed. Run /sandbox-reset to recreate."
      * Reuse the container.
    - If it exists but is stopped, start it.
    - If it does not exist, create and start it via dockerode
@@ -92,21 +94,23 @@ The hash covers the effective merged config (§3.3). It is computed during sessi
 5. If the directory is not empty, leave the container running.
 ```
 
-**Crash safety:** If a session crashes without emitting `session_shutdown`, its reference file leaks. The container will never be automatically cleaned up for that workspace. This is accepted for v1; the user can run `/prune-sandbox` to force removal.
+**Crash safety:** If a session crashes without emitting `session_shutdown`, its reference file leaks. The container will never be automatically cleaned up for that workspace. This is accepted for v1; the user can run `/sandbox-reset` to force removal.
 
 ### 2.6 Config Staleness Detection
 
 When reusing a running container (§2.4 step 6), the extension compares the stored config hash with the current effective config hash.
 
 - **Match:** No action.
-- **Mismatch:** Emit a warning notification. Do **not** stop or recreate the container automatically. Recreation is triggered by the `/prune-sandbox` command (§2.7).
+- **Mismatch:** Emit a warning notification. Do **not** stop or recreate the container automatically. Recreation is triggered by the `/sandbox-reset` command (§2.7).
+
+The staleness state is reported by `/sandbox-status`.
 
 > **Rationale:** Automatic recreation would race with other active sessions. A manual command lets the user decide when to interrupt running work.
 
-### 2.7 `/prune-sandbox` Command
+### 2.7 `/sandbox-reset` Command
 
-**Registered as:** `pi.registerCommand("prune-sandbox", { ... })`  
-**Description:** Force-stop and remove the workspace sandbox container, clearing all refcount state.
+**Registered as:** `pi.registerCommand("sandbox-reset", { ... })`  
+**Description:** Force-stop and remove the workspace sandbox container, clearing all refcount state. Users may run `/sandbox-status` before `/sandbox-reset` to inspect the current container, refcount, and config state.
 
 **Handler behavior:**
 
@@ -119,12 +123,12 @@ When reusing a running container (§2.4 step 6), the extension compares the stor
 5. Delete `${stateDir}/config-hash`.
 6. Delete all files in `${stateDir}/sessions/`.
 7. Notify the user:
-   "Pruned sandbox container. Removed {leaked} leaked session reference(s)."
+   "Reset sandbox container. Removed {leaked} leaked session reference(s)."
 ```
 
 **Error conditions:**
 - Container does not exist or is already removed → continue, do not fail.
-- `stateDir` does not exist → nothing to prune; notify "No sandbox state found."
+- `stateDir` does not exist → nothing to reset; notify "No sandbox state found."
 - Docker daemon unreachable → throw / surface error to user.
 
 **Postcondition:** The workspace has no running sandbox container and no refcount state. The next session start in this workspace will create a fresh container with the current config.
@@ -173,7 +177,7 @@ Session B starts (same workspace)
   Reads stored config-hash: hash(C1).
   Current configHash: hash(C2).
   Mismatch → emits warning:
-    "Sandbox config has changed. Run /prune-sandbox to recreate."
+    "Sandbox config has changed. Run /sandbox-reset to recreate."
   Reuses the container anyway.
 ```
 
@@ -184,7 +188,7 @@ Session B starts (same workspace)
 - **Do not** embed `configHash` in the container name. One workspace = one container name.
 - **Do not** implement idle timeout or automatic container expiration. Cleanup is strictly reference-counted.
 - **Do not** stop containers on config mismatch. Warn only.
-- **Do not** garbage-collect leaked containers automatically. Manual `/prune-sandbox` is the escape hatch for v1.
+- **Do not** garbage-collect leaked containers automatically. Manual `/sandbox-reset` is the escape hatch for v1.
 - **Do not** share containers across different workspaces, even if the workspace paths are symlink aliases.
 - **Do not** migrate running processes or state from an old container to a new one on config change.
 - **Do not** read or write the refcount state when `--no-sandbox` is active.
@@ -205,8 +209,8 @@ Session B starts (same workspace)
 Replace DESIGN.md §5.2 with §2.1 above.  
 Replace DESIGN.md §6.1 with §2.4 above.  
 Replace DESIGN.md §6.2 with §2.5 above.  
-Replace extension point 8 in DESIGN.md §8 with:
+Replace extension point 8 in DESIGN.md §9 with:
 
-> **8. `/prune-sandbox` command.** A registered command that force-stops and removes the workspace sandbox container, clearing all refcount state. This recreates the container with the latest config on the next session start. It is also used to recover from leaked reference files after a crash. Specified in [DESIGN_EXTENSION.workspace-scoped.md](DESIGN_EXTENSION.workspace-scoped.md) §2.7.
+> **8. `/sandbox-reset` command.** A registered command that force-stops and removes the workspace sandbox container, clearing all refcount state. This recreates the container with the latest config on the next session start. It is also used to recover from leaked reference files after a crash. Specified in [DESIGN_EXTENSION.workspace-scoped.md](DESIGN_EXTENSION.workspace-scoped.md) §2.7.
 
 Update DESIGN.md §7 "Filesystem hygiene" row with the "After" column from §5 above.

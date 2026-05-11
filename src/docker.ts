@@ -73,6 +73,14 @@ function isDockerNotFound(err: unknown): boolean {
   );
 }
 
+function isDockerConflict(err: unknown): boolean {
+  return (
+    err instanceof Error &&
+    "statusCode" in err &&
+    (err as { statusCode: number }).statusCode === 409
+  );
+}
+
 function isConnectionError(err: unknown): boolean {
   if (!(err instanceof Error)) return false;
   const msg = err.message.toLowerCase();
@@ -84,41 +92,104 @@ function isConnectionError(err: unknown): boolean {
   );
 }
 
+function rethrowDockerDaemonError(err: unknown): void {
+  if (isConnectionError(err)) {
+    throw new DockerDaemonUnreachableError();
+  }
+}
+
 export async function ensureContainer(
   docker: Dockerode,
   config: SandboxConfig,
   workspaceAbsolutePath: string,
   containerName: string,
-): Promise<Dockerode.Container> {
+): Promise<{ container: Dockerode.Container; created: boolean }> {
   const container = docker.getContainer(containerName);
   try {
     const info = await container.inspect();
     if (!info.State.Running) {
       await container.start();
     }
-    return container;
+    return { container, created: false };
+  } catch (err) {
+    if (!isDockerNotFound(err)) {
+      rethrowDockerDaemonError(err);
+      throw err;
+    }
+  }
+
+  createMissingDirs([...config.filesystem.ro, ...config.filesystem.rw]);
+  try {
+    const newContainer = await docker.createContainer({
+      name: containerName,
+      Image: config.image,
+      Cmd: ["sleep", "infinity"],
+      HostConfig: {
+        NetworkMode: "none",
+        CapDrop: ["ALL"],
+        SecurityOpt: ["no-new-privileges:true"],
+        Binds: buildBindMounts(config.filesystem, workspaceAbsolutePath),
+      },
+      Env: buildEnvVars(config.env, process.env.HOME ?? "/root"),
+      WorkingDir: workspaceAbsolutePath,
+    });
+    await newContainer.start();
+    return { container: newContainer, created: true };
+  } catch (err) {
+    if (!isDockerConflict(err)) {
+      rethrowDockerDaemonError(err);
+      throw err;
+    }
+  }
+
+  const existing = docker.getContainer(containerName);
+  const existingInfo = await existing.inspect();
+  if (!existingInfo.State.Running) {
+    await existing.start();
+  }
+  return { container: existing, created: false };
+}
+
+export async function getContainerStatus(
+  docker: Dockerode,
+  containerName: string,
+): Promise<"running" | "stopped" | "not found"> {
+  const container = docker.getContainer(containerName);
+  try {
+    const info = await container.inspect();
+    return info.State.Running ? "running" : "stopped";
   } catch (err) {
     if (isDockerNotFound(err)) {
-      createMissingDirs([...config.filesystem.ro, ...config.filesystem.rw]);
-      const newContainer = await docker.createContainer({
-        name: containerName,
-        Image: config.image,
-        Cmd: ["sleep", "infinity"],
-        HostConfig: {
-          NetworkMode: "none",
-          CapDrop: ["ALL"],
-          SecurityOpt: ["no-new-privileges:true"],
-          Binds: buildBindMounts(config.filesystem, workspaceAbsolutePath),
-        },
-        Env: buildEnvVars(config.env, process.env.HOME ?? "/root"),
-        WorkingDir: workspaceAbsolutePath,
-      });
-      await newContainer.start();
-      return newContainer;
+      return "not found";
     }
-    if (isConnectionError(err)) {
-      throw new DockerDaemonUnreachableError();
+    rethrowDockerDaemonError(err);
+    throw err;
+  }
+}
+
+export async function stopAndRemoveContainer(
+  docker: Dockerode,
+  containerName: string,
+): Promise<void> {
+  const container = docker.getContainer(containerName);
+
+  try {
+    await container.stop({ t: 1 });
+  } catch (err) {
+    if (isDockerNotFound(err)) {
+      return;
     }
+    rethrowDockerDaemonError(err);
+    // Other stop errors (e.g., already stopped) are benign.
+  }
+
+  try {
+    await container.remove({ force: true });
+  } catch (err) {
+    if (isDockerNotFound(err)) {
+      return;
+    }
+    rethrowDockerDaemonError(err);
     throw err;
   }
 }

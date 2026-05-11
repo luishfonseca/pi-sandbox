@@ -37,6 +37,8 @@ After `loadConfig()` returns the merged `SandboxConfig` and before any ACL evalu
 
 **Invariant:** The augmentation is never written to disk. It is a runtime-only modification of the in-memory merged config.
 
+The augmentation status (whether `PI_PACKAGE_DIR` was present and appended) is visible in `/sandbox-status`.
+
 ### 2.2 Interaction with Other Rules
 
 Because `piDir` is appended as a flat prefix alongside all other configured prefixes, existing rules behave as follows:
