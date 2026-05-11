@@ -4,8 +4,8 @@ import { homedir } from "node:os";
 import { resolve, join } from "node:path";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { evaluateAccess, resolvePath, resolveSymlinks, type AccessOperation, type DenialReason } from "./acl.js";
-import type { FilesystemConfig } from "./config.js";
+import { evaluateAccess, resolvePath, resolveSymlinks, type AccessOperation, type DenialReason } from "../src/acl.js";
+import type { FilesystemConfig } from "../src/config.js";
 
 const WORKSPACE = "/home/user/projects/myapp";
 

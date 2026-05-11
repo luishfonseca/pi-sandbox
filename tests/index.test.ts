@@ -5,8 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import type { Container } from "dockerode";
-import { createSandboxExtension } from "./index.js";
-import type { SandboxConfig } from "./config.js";
+import { createSandboxExtension } from "../src/index.js";
+import type { SandboxConfig } from "../src/config.js";
 
 function makeTempDir(): string {
   return mkdtempSync(join(tmpdir(), "pi-sandbox-index-test-"));

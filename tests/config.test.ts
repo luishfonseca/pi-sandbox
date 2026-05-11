@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, it } from "node:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadConfig, mergeConfigs, validateConfig } from "./config.js";
+import { loadConfig, mergeConfigs, validateConfig } from "../src/config.js";
 
 function makeTempDir(): string {
   return mkdtempSync(join(tmpdir(), "pi-sandbox-config-test-"));

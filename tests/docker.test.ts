@@ -12,8 +12,8 @@ import {
   execInContainer,
   doesImageExist,
   pullImage,
-} from "./docker.js";
-import type { FilesystemConfig, SandboxConfig } from "./config.js";
+} from "../src/docker.js";
+import type { FilesystemConfig, SandboxConfig } from "../src/config.js";
 
 const IMAGE = "alpine:latest";
 const docker = new Dockerode();

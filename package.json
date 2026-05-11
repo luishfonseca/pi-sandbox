@@ -4,8 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "tsx --test src/**/*.test.ts",
-    "lint": "eslint src/**/*.ts && tsc --noEmit",
+    "test": "tsx --test tests/**/*.test.ts",
+    "lint": "eslint src/**/*.ts tests/**/*.ts && tsc --noEmit",
     "check": "npm run lint && npm run test"
   },
   "pi": {
