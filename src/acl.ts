@@ -1,6 +1,6 @@
-import { homedir } from "node:os";
 import { resolve, dirname, basename, join } from "node:path";
 import { realpathSync } from "node:fs";
+import { expandTilde } from "./path.js";
 import type { FilesystemConfig } from "./config.js";
 
 export type AccessOperation = "read" | "write";
@@ -13,14 +13,7 @@ export interface AccessResult {
 }
 
 export function resolvePath(path: string, workspaceAbsolutePath: string): string {
-  let expanded = path;
-
-  if (expanded === "~") {
-    expanded = homedir();
-  } else if (expanded.startsWith("~/")) {
-    expanded = resolve(homedir(), expanded.slice(2));
-  }
-
+  const expanded = expandTilde(path);
   const resolved = resolve(workspaceAbsolutePath, expanded);
 
   if (resolved !== "/" && resolved.endsWith("/")) {

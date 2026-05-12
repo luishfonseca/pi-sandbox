@@ -62,7 +62,8 @@ interface SandboxConfig {
 
 **Validation rules:**
 - `image` MUST be present and a non-empty string in the merged config.
-- All `filesystem` prefixes MUST be absolute paths, contain no `*`, `?`, or `..`, and not end with `/` (except root `/`).
+- All `filesystem` prefixes MUST be absolute paths after tilde expansion (`~` is expanded to the user's home directory; `~username` is unsupported), contain no `*`, `?`, or `..`, and not end with `/` (except root `/`).
+- All `env` values MUST be strings. If an `env` value is not a string, the extension MUST throw an error naming the key and actual type.
 - Unknown keys MUST be ignored with a warning.
 
 **No hardcoded defaults.** If `rw` or `ro` is absent after merging, it is empty (`[]`).
@@ -256,7 +257,6 @@ See [DESIGN_EXTENSION.workspace-scoped.md](DESIGN_EXTENSION.workspace-scoped.md)
 
 **Known limitations (accepted for v1):**
 - Symlinks are not resolved before ACL checks. A symlink to `/etc/shadow` inside the workspace is treated as a workspace path. See [DESIGN_EXTENSION.symlinks.md](DESIGN_EXTENSION.symlinks.md) for the resolution extension.
-- Network is fully disabled (`HostConfig.NetworkMode: "none"`). There is no per-domain egress filtering.
 
 ---
 
@@ -366,7 +366,7 @@ Output:
 
 The following are explicitly deferred. v1 MUST compile and run without them.
 
-1. **Egress sidecar / per-domain filtering.** Replace `HostConfig.NetworkMode: "none"` with a bridge network + sidecar.
+1. **Egress sidecar / per-domain filtering.** Replace `HostConfig.NetworkMode: "none"` with a bridge network + sidecar. Specified in [DESIGN_EXTENSION.network-sidecar.md](DESIGN_EXTENSION.network-sidecar.md).
 2. **Cache persistence.** Named volumes for package managers.
 3. **Symlink resolution.** Call `fs.realpathSync` before ACL evaluation. Specified in [DESIGN_EXTENSION.symlinks.md](DESIGN_EXTENSION.symlinks.md).
 4. **Mask / downgrade mounts.** VFS-level enforcement of read-only restrictions inside read-write trees.

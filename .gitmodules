@@ -1,0 +1,3 @@
+[submodule "sidecar"]
+	path = sidecar
+	url = git@github.com:luishfonseca/proxyjail.git

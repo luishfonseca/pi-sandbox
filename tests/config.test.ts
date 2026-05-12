@@ -1,8 +1,8 @@
 import assert from "node:assert";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { loadConfig, mergeConfigs, validateConfig, augmentConfigWithPiDir } from "../src/config.js";
 import type { SandboxConfig } from "../src/config.js";
 
@@ -42,6 +42,30 @@ describe("mergeConfigs", () => {
     assert.deepStrictEqual(config.env, { A: "1" });
   });
 
+  it("throws when global env value is not a string", () => {
+    assert.throws(
+      () => {
+        mergeConfigs(
+          { env: { GOPATH: ["/home/luis/go"] } },
+          {},
+        );
+      },
+      /env value for "GOPATH" in global config must be a string, got object/,
+    );
+  });
+
+  it("throws when workspace env value is not a string", () => {
+    assert.throws(
+      () => {
+        mergeConfigs(
+          {},
+          { env: { GOPATH: ["/home/luis/go"] } },
+        );
+      },
+      /env value for "GOPATH" in workspace config must be a string, got object/,
+    );
+  });
+
   it("appends filesystem lists", () => {
     const { config } = mergeConfigs(
       { filesystem: { rw: ["/a"], ro: ["/b"] } },
@@ -66,6 +90,15 @@ describe("mergeConfigs", () => {
     assert.strictEqual(warnings.length, 2);
     assert.ok(warnings.some((w) => w.includes('Unknown key "unknown"')));
     assert.ok(warnings.some((w) => w.includes('Unknown key "alsoUnknown"')));
+  });
+
+  it("expands ~ in filesystem prefixes", () => {
+    const { config } = mergeConfigs(
+      { filesystem: { rw: ["~/.pi/shared"], ro: ["~"] } },
+      { filesystem: { rw: ["~/workspace"], ro: [] } },
+    );
+    assert.deepStrictEqual(config.filesystem.rw, [resolve(homedir(), ".pi/shared"), resolve(homedir(), "workspace")]);
+    assert.deepStrictEqual(config.filesystem.ro, [homedir()]);
   });
 });
 
@@ -101,6 +134,19 @@ describe("validateConfig", () => {
         });
       },
       /non-empty "image"/,
+    );
+  });
+
+  it("throws when env value is not a string", () => {
+    assert.throws(
+      () => {
+        validateConfig({
+          image: "alpine",
+          env: { GOPATH: ["/home/luis/go"] as unknown as string },
+          filesystem: { rw: [], ro: [] },
+        });
+      },
+      /env value for "GOPATH" must be a string, got object/,
     );
   });
 
@@ -163,6 +209,27 @@ describe("validateConfig", () => {
       filesystem: { rw: ["/"], ro: [] },
     });
   });
+
+  it("allows ~ expanded to homedir", () => {
+    validateConfig({
+      image: "alpine",
+      env: {},
+      filesystem: { rw: [homedir()], ro: [resolve(homedir(), ".pi/shared")] },
+    });
+  });
+
+  it("throws for ~user treated as literal non-absolute path", () => {
+    assert.throws(
+      () => {
+        validateConfig({
+          image: "alpine",
+          env: {},
+          filesystem: { rw: ["~user/foo"], ro: [] },
+        });
+      },
+      /must be absolute/,
+    );
+  });
 });
 
 describe("loadConfig", () => {
@@ -219,6 +286,13 @@ describe("loadConfig", () => {
     assert.strictEqual(config.image, "global");
     assert.strictEqual(warnings.length, 1);
     assert.ok(warnings[0]?.includes("Invalid JSON"));
+  });
+
+  it("throws when workspace env value is not a string", () => {
+    const globalPath = join(tmpDir, ".pi");
+    writeFileSync(join(globalPath, "sandbox.json"), JSON.stringify({ image: "global" }));
+    writeFileSync(join(tmpDir, "sandbox.json"), JSON.stringify({ image: "workspace", env: { GOPATH: ["/home/luis/go"] } }));
+    assert.throws(() => loadConfig(tmpDir), /env value for "GOPATH" in workspace config must be a string, got object/);
   });
 });
 

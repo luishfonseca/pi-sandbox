@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { expandTilde } from "./path.js";
 
 export interface FilesystemConfig {
   rw: string[];
@@ -69,15 +70,16 @@ function loadRequiredConfig(filePath: string): unknown {
   }
 }
 
-function extractStringMap(value: unknown): Record<string, string> {
+function extractStringMap(value: unknown, context: string): Record<string, string> {
   if (!isObject(value)) {
     return {};
   }
   const result: Record<string, string> = {};
   for (const [k, v] of Object.entries(value)) {
-    if (typeof v === "string") {
-      result[k] = v;
+    if (typeof v !== "string") {
+      throw new Error(`env value for "${k}" in ${context} must be a string, got ${typeof v}`);
     }
+    result[k] = v;
   }
   return result;
 }
@@ -88,8 +90,8 @@ function extractFilesystem(value: unknown, filePath: string): { config: Filesyst
   }
   const warnings = collectUnknownKeyWarnings(value, FILESYSTEM_KEYS, filePath);
 
-  const rw = extractStringArray(value.rw);
-  const ro = extractStringArray(value.ro);
+  const rw = extractStringArray(value.rw).map(expandTilde);
+  const ro = extractStringArray(value.ro).map(expandTilde);
 
   return { config: { rw, ro }, warnings };
 }
@@ -165,6 +167,12 @@ export function validateConfig(config: SandboxConfig): void {
     throw new Error('Merged sandbox config must have a non-empty "image" string');
   }
 
+  for (const [key, value] of Object.entries(config.env)) {
+    if (typeof value !== "string") {
+      throw new Error(`env value for "${key}" must be a string, got ${typeof value}`);
+    }
+  }
+
   for (const prefix of config.filesystem.rw) {
     validatePrefix(prefix, "filesystem.rw");
   }
@@ -181,8 +189,8 @@ export function mergeConfigs(globalRaw: unknown, workspaceRaw: unknown): { confi
   warnings.push(...collectUnknownKeyWarnings(globalObj, TOP_LEVEL_KEYS, "global config"));
   warnings.push(...collectUnknownKeyWarnings(workspaceObj, TOP_LEVEL_KEYS, "workspace config"));
 
-  const globalEnv = extractStringMap(globalObj.env);
-  const workspaceEnv = extractStringMap(workspaceObj.env);
+  const globalEnv = extractStringMap(globalObj.env, "global config");
+  const workspaceEnv = extractStringMap(workspaceObj.env, "workspace config");
 
   const globalFs = extractFilesystem(globalObj.filesystem, "global config#filesystem");
   const workspaceFs = extractFilesystem(workspaceObj.filesystem, "workspace config#filesystem");
