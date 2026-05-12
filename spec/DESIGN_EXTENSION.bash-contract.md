@@ -12,7 +12,7 @@
 The extension overrides the built-in `bash` tool.  Every `bash` tool call is executed inside the sandbox container via **dockerode**.
 
 **Preconditions:**
-1. The sandbox container is running.
+1. The sandbox container is running, **or the handler will establish the connection lazily before execution** (see [DESIGN_EXTENSION.workspace-scoped.md](DESIGN_EXTENSION.workspace-scoped.md) §2.4.1).
 
 **Postconditions:**
 1. The command executes as a new process inside the container.
@@ -141,6 +141,9 @@ After the stream ends (or the exec is killed):
 | Docker daemon unreachable | Connection error inspecting container | Return `{ content: [{ type: "text", text: "Docker daemon unreachable" }], details: { error: "Docker daemon unreachable" }, isError: true }` |
 | Timeout | Timer fires before stream end | Kill exec PID, return `{ content, details: { exitCode: null, stdout, stderr }, isError: true }` with timeout message appended after partial output |
 | Abort | `signal.aborted` or abort event | Kill exec PID, return `{ content, details: { exitCode: null, stdout, stderr }, isError: true }` with abort message appended after partial output |
+| Sandbox not initialized | `session_start` did not run | Return `{ content: [{ type: "text", text: "Sandbox not initialized" }], details: { error: "Sandbox not initialized" }, isError: true }` |
+| Image pull in progress | Image missing, async pull active | Return `{ content: [{ type: "text", text: "Pulling sandbox image {image}..." }], details: { error: "Image pull in progress" }, isError: true }` |
+| Previous image pull failed | Prior async pull ended with error | Return `{ content: [{ type: "text", text: "Sandbox unavailable: {message}" }], details: { error: "{message}" }, isError: true }` |
 | Command references path outside mounts | Exec returns `No such file or directory` | Forwarded natively via `exitCode: 1` and `stderr` |
 
 ---

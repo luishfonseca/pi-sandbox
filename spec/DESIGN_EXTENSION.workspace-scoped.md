@@ -50,33 +50,48 @@ The hash covers the effective merged config (§3.3). It is computed during sessi
 
 ### 2.4 Session Start
 
-**Precondition:** Docker daemon is reachable.  
-**Postcondition:** The current session is registered as a user of the workspace-scoped container. The container itself is started lazily on the first `bash` tool call, not during session start.
+**Precondition:** None. The handler runs even if Docker is unreachable.  
+**Postcondition:** The workspace path and effective configuration are resolved. The extension is ready to intercept tool calls.
 
 ```
 1. Resolve workspaceAbsolutePath ← fs.realpathSync(ctx.cwd).
-2. Compute configHash (§2.3).
-3. Compute stateDir from ctx.sessionManager.getSessionDir() (§2.2).
-4. Load and validate the merged config.
-5. Mark session ready.
+2. Compute stateDir from ctx.sessionManager.getSessionDir() (§2.2).
+3. Load and validate the merged config.
 ```
 
-**Note:** `session_start` does not acquire a session reference. A session only becomes a refcounted container user when it triggers lazy connection via a `bash` tool call.
+**Note:** `session_start` does not create the container, start the container, or acquire a session reference. Those actions happen on the first `bash` tool call (§2.4.1).
 
-**Lazy connection.** The container is not created or started during `session_start`. The first `bash` tool call in any session triggers the connection under a per-workspace mutex. The connection logic is identical to the previous eager start:
-- If the image is missing, an async pull begins.
-- If the container exists and is running, it is reused.
+#### 2.4.1 Lazy Connection
+
+The first `bash` tool call in any session triggers connection to the workspace-scoped container. The extension serializes container operations per workspace.
+
+**Connection rules:**
+- If the container already exists and is running, it is reused.
 - If the container exists but is stopped, it is started.
 - If the container does not exist, it is created and started.
 - After creation, the current config hash is written to `${stateDir}/config-hash`.
-- The session reference is acquired during lazy connect. This is the only place refcount state is written; `session_start` does not touch the refcount.
 
-**Race safety:** Two sessions starting concurrently in the same workspace both write their reference file. The first `bash` call from either session acquires the lifecycle mutex and creates/starts the container. Subsequent `bash` calls see the healthy container and reuse it. If both attempt `docker.createContainer` with the same name, Docker rejects the second with a name-conflict error; the second falls back to `container.start()` or reuse.
+**Session reference.** The session reference file is written on the first `bash` tool call, making the session a refcounted container user. `session_start` never touches refcount state.
+
+**Image pull.** If the configured image is not present locally:
+1. An asynchronous pull begins.
+2. The `bash` call that triggered the pull receives an error result indicating the pull is in progress.
+3. Subsequent `bash` calls made while the pull is active receive the same in-progress error.
+4. When the pull completes, the container is created automatically.
+5. If the pull fails, the failure message is retained. Subsequent `bash` calls receive an error result containing that message until `/sandbox-reset` is run.
+
+**Config staleness.** When reusing an existing container, the extension compares the stored config hash with the current effective hash.
+- **Match:** No action.
+- **Mismatch:** A warning notification is emitted. The container is **not** recreated automatically. See §2.6.
+
+**Race safety.** If two sessions in the same workspace both trigger connection concurrently, one succeeds in creating or starting the container; the other sees the healthy container and reuses it.
 
 ### 2.5 Session Shutdown
 
 **Triggered by:** `session_shutdown` event.  
-**Postcondition:** The session's reference file is removed. If no references remain, the container is stopped and removed.
+**Postcondition:** The session's reference file is removed (if it exists). If no references remain, the container is stopped and removed.
+
+**Precondition guard:** If `session_start` did not run in this extension instance, the handler returns immediately.
 
 ```
 1. Compute stateDir from ctx.sessionManager.getSessionDir() (§2.2).
@@ -89,6 +104,8 @@ The hash covers the effective merged config (§3.3). It is computed during sessi
    - Delete `${stateDir}/config-hash`.
 5. If the directory is not empty, leave the container running.
 ```
+
+**Idempotency:** Deleting a missing reference file is a no-op.
 
 **Crash safety:** If a session crashes without emitting `session_shutdown`, its reference file leaks. The container will never be automatically cleaned up for that workspace. This is accepted for v1; the user can run `/sandbox-reset` to force removal.
 
