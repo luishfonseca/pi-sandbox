@@ -59,12 +59,13 @@ function createMockCtx(
   cwd: string,
   notifications?: { message: string; type: string }[],
   sessionDir?: string,
+  sessionId: string = "test-session-id",
 ): ExtensionContext {
   return {
     cwd,
     hasUI: false,
     sessionManager: {
-      getSessionId: () => "test-session-id",
+      getSessionId: () => sessionId,
       getSessionDir: () => sessionDir ?? cwd,
       getSessionFile: () => undefined,
       getEntries: () => [],
@@ -126,49 +127,6 @@ function getCommandByName(pi: MockPi, name: string): MockCommand {
   return cmd;
 }
 
-function createMockCtxWithSession(
-  cwd: string,
-  sessionId: string,
-  notifications?: { message: string; type: string }[],
-  sessionDir?: string,
-): ExtensionContext {
-  return {
-    cwd,
-    hasUI: false,
-    sessionManager: {
-      getSessionId: () => sessionId,
-      getSessionDir: () => sessionDir ?? cwd,
-      getSessionFile: () => undefined,
-      getEntries: () => [],
-      getBranch: () => [],
-      getLeafId: () => "",
-    },
-    ui: {
-      notify: (message: string, type: string) => {
-        notifications?.push({ message, type });
-      },
-      confirm: () => Promise.resolve(false),
-      select: () => Promise.resolve(undefined),
-      input: () => Promise.resolve(undefined),
-      editor: () => Promise.resolve(undefined),
-      setStatus: () => undefined,
-      setWidget: () => undefined,
-      setTitle: () => undefined,
-      setEditorText: () => undefined,
-      theme: {} as unknown as ExtensionContext["ui"]["theme"],
-    },
-    signal: undefined,
-    isIdle: () => true,
-    abort: () => undefined,
-    hasPendingMessages: () => false,
-    shutdown: () => undefined,
-    getContextUsage: () => undefined,
-    compact: () => undefined,
-    getSystemPrompt: () => "",
-    modelRegistry: {} as unknown as ExtensionContext["modelRegistry"],
-    model: {} as unknown as ExtensionContext["model"],
-  } as unknown as ExtensionContext;
-}
 
 describe("createSandboxExtension", () => {
   let tmpDir: string;
@@ -923,8 +881,8 @@ describe("createSandboxExtension", () => {
     });
     ext(pi);
 
-    const ctxA = createMockCtxWithSession(tmpDir, "session-a");
-    const ctxB = createMockCtxWithSession(tmpDir, "session-b");
+    const ctxA = createMockCtx(tmpDir, undefined, undefined, "session-a");
+    const ctxB = createMockCtx(tmpDir, undefined, undefined, "session-b");
 
     await getHandler(pi, "session_start")({}, ctxA);
     await getHandler(pi, "session_start")({}, ctxB);
@@ -985,7 +943,7 @@ describe("createSandboxExtension", () => {
     });
     extA(piA);
 
-    const ctxA = createMockCtxWithSession(tmpDir, "session-a", notifications);
+    const ctxA = createMockCtx(tmpDir, notifications, undefined, "session-a");
     await getHandler(piA, "session_start")({}, ctxA);
     const bashToolA = getFirstTool(piA);
     await bashToolA.execute("call-a", { command: "echo hi" }, undefined, undefined, ctxA);
@@ -1000,7 +958,7 @@ describe("createSandboxExtension", () => {
     });
     extB(piB);
 
-    const ctxB = createMockCtxWithSession(tmpDir, "session-b", notifications);
+    const ctxB = createMockCtx(tmpDir, notifications, undefined, "session-b");
     await getHandler(piB, "session_start")({}, ctxB);
     const bashToolB = getFirstTool(piB);
     await bashToolB.execute("call-b", { command: "echo hi" }, undefined, undefined, ctxB);
@@ -1195,14 +1153,14 @@ describe("createSandboxExtension", () => {
     });
     ext(pi);
 
-    const ctx1 = createMockCtxWithSession(tmpDir, "session-a", notifications);
+    const ctx1 = createMockCtx(tmpDir, notifications, undefined, "session-a");
     await getHandler(pi, "session_start")({}, ctx1);
 
     // Session A triggers lazy connect, writing the config hash for config1.
     const bashTool = getFirstTool(pi);
     await bashTool.execute("call-a", { command: "echo hi" }, undefined, undefined, ctx1);
 
-    const ctx2 = createMockCtxWithSession(tmpDir, "session-b", notifications);
+    const ctx2 = createMockCtx(tmpDir, notifications, undefined, "session-b");
     await getHandler(pi, "session_start")({}, ctx2);
 
     const statusCmd = getCommandByName(pi, "sandbox-status");

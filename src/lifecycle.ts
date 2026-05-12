@@ -22,15 +22,19 @@ export function acquireSessionRef(stateDir: string, sessionId: string): void {
   writeFileSync(`${sessionsDir}/${sessionId}`, "");
 }
 
-export function releaseSessionRef(stateDir: string, sessionId: string): boolean {
-  const sessionFile = `${stateDir}/sessions/${sessionId}`;
+function swallowEnoent(fn: () => void): void {
   try {
-    unlinkSync(sessionFile);
+    fn();
   } catch (err) {
     if (!isNodeError(err) || err.code !== "ENOENT") {
       throw err;
     }
   }
+}
+
+export function releaseSessionRef(stateDir: string, sessionId: string): boolean {
+  const sessionFile = `${stateDir}/sessions/${sessionId}`;
+  swallowEnoent(() => unlinkSync(sessionFile));
 
   try {
     const files = readdirSync(`${stateDir}/sessions`);
@@ -59,13 +63,7 @@ export function writeConfigHash(stateDir: string, configHash: string): void {
 }
 
 export function deleteConfigHash(stateDir: string): void {
-  try {
-    unlinkSync(`${stateDir}/config-hash`);
-  } catch (err) {
-    if (!isNodeError(err) || err.code !== "ENOENT") {
-      throw err;
-    }
-  }
+  swallowEnoent(() => unlinkSync(`${stateDir}/config-hash`));
 }
 
 export function countStaleRefs(stateDir: string): number {
@@ -80,18 +78,14 @@ export function countStaleRefs(stateDir: string): number {
 }
 
 export function resetState(stateDir: string): void {
-  try {
+  swallowEnoent(() => {
     const sessionsDir = `${stateDir}/sessions`;
     const files = readdirSync(sessionsDir);
     for (const file of files) {
       unlinkSync(`${sessionsDir}/${file}`);
     }
     rmdirSync(sessionsDir);
-  } catch (err) {
-    if (!isNodeError(err) || err.code !== "ENOENT") {
-      throw err;
-    }
-  }
+  });
   deleteConfigHash(stateDir);
   try {
     rmdirSync(stateDir);

@@ -4,6 +4,7 @@ import { kill } from "node:process";
 import { PassThrough } from "node:stream";
 import { truncateTail, DEFAULT_MAX_LINES, DEFAULT_MAX_BYTES } from "@mariozechner/pi-coding-agent";
 import type { TruncationResult } from "@mariozechner/pi-coding-agent";
+import { isNodeError } from "./acl.js";
 import type { FilesystemConfig, SandboxConfig } from "./config.js";
 
 export class DockerDaemonUnreachableError extends Error {
@@ -65,7 +66,7 @@ async function killExec(exec: Dockerode.Exec, sig: NodeJS.Signals = "SIGKILL"): 
   try {
     kill(pid, sig);
   } catch (err) {
-    if (err instanceof Error && "code" in err && (err as { code: string }).code === "ESRCH") {
+    if (isNodeError(err) && err.code === "ESRCH") {
       return;
     }
     throw err;
@@ -102,20 +103,16 @@ export function createMissingDirs(paths: string[]): void {
   }
 }
 
+function hasStatusCode(err: unknown, statusCode: number): boolean {
+  return err instanceof Error && "statusCode" in err && (err as { statusCode: number }).statusCode === statusCode;
+}
+
 export function isDockerNotFound(err: unknown): boolean {
-  return (
-    err instanceof Error &&
-    "statusCode" in err &&
-    (err as { statusCode: number }).statusCode === 404
-  );
+  return hasStatusCode(err, 404);
 }
 
 function isDockerConflict(err: unknown): boolean {
-  return (
-    err instanceof Error &&
-    "statusCode" in err &&
-    (err as { statusCode: number }).statusCode === 409
-  );
+  return hasStatusCode(err, 409);
 }
 
 function isConnectionError(err: unknown): boolean {
@@ -231,6 +228,10 @@ export async function stopAndRemoveContainer(
   }
 }
 
+function abortedResult(): ExecInContainerResult {
+  return { stdout: "", stderr: "", exitCode: null, timedOut: false, aborted: true };
+}
+
 export async function execInContainer(
   container: Dockerode.Container,
   options: ExecInContainerOptions,
@@ -238,7 +239,7 @@ export async function execInContainer(
   const { command, cwd, timeout, signal, onUpdate } = options;
 
   if (signal?.aborted) {
-    return { stdout: "", stderr: "", exitCode: null, timedOut: false, aborted: true };
+    return abortedResult();
   }
 
   const exec = await container.exec({
@@ -249,7 +250,7 @@ export async function execInContainer(
   });
 
   if (signal?.aborted) {
-    return { stdout: "", stderr: "", exitCode: null, timedOut: false, aborted: true };
+    return abortedResult();
   }
 
   const stream = await exec.start({ hijack: true, stdin: false });
@@ -257,7 +258,7 @@ export async function execInContainer(
   if (signal?.aborted) {
     await killExec(exec, "SIGKILL");
     stream.destroy();
-    return { stdout: "", stderr: "", exitCode: null, timedOut: false, aborted: true };
+    return abortedResult();
   }
 
   const stdout = new PassThrough();

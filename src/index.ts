@@ -139,19 +139,16 @@ export function createSandboxExtension(options: SandboxExtensionOptions = {}): (
       try {
         resolved = resolveSymlinks(normalized);
       } catch (err) {
-        if (err instanceof Error && "code" in err) {
-          const code = (err as NodeJS.ErrnoException).code;
-          if (code === "ENOENT") {
-            return { block: true, reason: `Path outside workspace: ${path}` };
-          }
-          if (code === "EACCES") {
-            return { block: true, reason: `Permission denied resolving path: ${path}` };
-          }
-          if (code === "ELOOP") {
-            return { block: true, reason: `Symlink loop detected: ${path}` };
-          }
-          if (code === "ENOTDIR") {
-            return { block: true, reason: `Not a directory in path: ${path}` };
+        if (isNodeError(err)) {
+          switch (err.code) {
+            case "ENOENT":
+              return { block: true, reason: `Path outside workspace: ${path}` };
+            case "EACCES":
+              return { block: true, reason: `Permission denied resolving path: ${path}` };
+            case "ELOOP":
+              return { block: true, reason: `Symlink loop detected: ${path}` };
+            case "ENOTDIR":
+              return { block: true, reason: `Not a directory in path: ${path}` };
           }
         }
         throw err;

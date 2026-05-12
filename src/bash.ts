@@ -36,6 +36,18 @@ export interface EnsureConnectedOptions {
   acquireSessionRef: (stateDir: string, sessionId: string) => void;
 }
 
+async function isHealthy(container: Dockerode.Container): Promise<boolean> {
+  try {
+    const info = await container.inspect();
+    return info.State.Running;
+  } catch (err) {
+    if (isDockerNotFound(err) || err instanceof DockerDaemonUnreachableError) {
+      return false;
+    }
+    throw err;
+  }
+}
+
 export function createEnsureConnected(options: EnsureConnectedOptions): (
   ctx: ExtensionContext,
 ) => Promise<{ container: Dockerode.Container } | { error: string }> {
@@ -51,55 +63,16 @@ export function createEnsureConnected(options: EnsureConnectedOptions): (
     const container = options.state.container;
 
     // Fast-path: container looks healthy.
-    let needsConnect = container === undefined;
-    if (!needsConnect && container !== undefined) {
-      try {
-        const info = await container.inspect();
-        if (!info.State.Running) {
-          needsConnect = true;
-        }
-      } catch (err) {
-        if (isDockerNotFound(err) || err instanceof DockerDaemonUnreachableError) {
-          needsConnect = true;
-        } else {
-          throw err;
-        }
-      }
-    }
-
-    if (!needsConnect) {
-      const readyContainer = container;
-      if (readyContainer === undefined) {
-        return { error: "Sandbox container not running" };
-      }
-      return { container: readyContainer };
+    if (container !== undefined && (await isHealthy(container))) {
+      return { container };
     }
 
     const release = await options.lifecycleMutex.acquire();
     try {
       // Double-check inside the mutex.
-      let stillNeedsConnect = options.state.container === undefined;
-      if (!stillNeedsConnect && options.state.container !== undefined) {
-        try {
-          const info = await options.state.container.inspect();
-          if (!info.State.Running) {
-            stillNeedsConnect = true;
-          }
-        } catch (err) {
-          if (isDockerNotFound(err) || err instanceof DockerDaemonUnreachableError) {
-            stillNeedsConnect = true;
-          } else {
-            throw err;
-          }
-        }
-      }
-
-      if (!stillNeedsConnect) {
-        const existingContainer = options.state.container;
-        if (existingContainer === undefined) {
-          return { error: "Sandbox container not running" };
-        }
-        return { container: existingContainer };
+      const container = options.state.container;
+      if (container !== undefined && (await isHealthy(container))) {
+        return { container };
       }
 
       if (options.state.pull.error) {
@@ -140,14 +113,14 @@ export function createBashToolHandler(deps: BashToolDependencies): (
   params: { command: string; timeout?: number },
   signal: AbortSignal | undefined,
   onUpdate: AgentToolUpdateCallback<unknown> | undefined,
-  _ctx: ExtensionContext,
+  ctx: ExtensionContext,
 ) => Promise<AgentToolResult<unknown>> {
   return async function execute(
     toolCallId: string,
     params: { command: string; timeout?: number },
     signal: AbortSignal | undefined,
     onUpdate: AgentToolUpdateCallback<unknown> | undefined,
-    _ctx: ExtensionContext,
+    ctx: ExtensionContext,
   ) {
     if (deps.getNoSandbox()) {
       return deps.localBash.execute(toolCallId, params, signal, onUpdate);
@@ -166,7 +139,7 @@ export function createBashToolHandler(deps: BashToolDependencies): (
       };
     }
 
-    const connected = await deps.ensureConnected(_ctx);
+    const connected = await deps.ensureConnected(ctx);
     if ("error" in connected) {
       return {
         content: [{ type: "text" as const, text: connected.error }],
