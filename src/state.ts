@@ -9,6 +9,7 @@ export interface SandboxState {
     isPulling: boolean;
     error: string | undefined;
   };
+  fatalError?: string;
 }
 
 export function createSandboxState(): SandboxState {

@@ -175,4 +175,75 @@ describe("startSandboxContainer", () => {
     assert.strictEqual(result.configStaleness, false);
     assert.strictEqual(existsSync(join(tmpDir, "config-hash")), true);
   });
+
+  it("creates sidecar and app when network policy is active", async () => {
+    const state = createSandboxState();
+    const mockContainer = { id: "c1" } as unknown as Dockerode.Container;
+    const tmpDir = makeTempDir();
+
+    let ensureNetworkCalled = false;
+    let ensureSidecarCalled = false;
+    let networkModePassed: string | undefined;
+
+    const result = await startSandboxContainer(
+      state,
+      {
+        docker: {} as Dockerode,
+        doesImageExistFn: () => Promise.resolve(true),
+        ensureContainerFn: (_docker, _cfg, _workspace, _name, networkMode) => {
+          networkModePassed = networkMode;
+          return Promise.resolve({ container: mockContainer, created: true });
+        },
+        pullImageFn: () => Promise.resolve(),
+        ensureNetworkFn: () => { ensureNetworkCalled = true; return Promise.resolve(); },
+        ensureSidecarContainerFn: () => { ensureSidecarCalled = true; return Promise.resolve({ container: { id: "s1" } as unknown as Dockerode.Container, created: true }); },
+      },
+      { image: "alpine", env: {}, filesystem: { rw: [], ro: [] }, network: { domains: ["example.com"] } },
+      tmpDir,
+      "pi-sandbox-test",
+      tmpDir,
+    );
+
+    assert.strictEqual(result.kind, "ready");
+    assert.strictEqual(ensureNetworkCalled, true);
+    assert.strictEqual(ensureSidecarCalled, true);
+    assert.ok(networkModePassed?.startsWith("container:"));
+    assert.strictEqual(existsSync(join(tmpDir, "sing-box-config.json")), true);
+  });
+
+  it("pulls sidecar image when network policy is active and sidecar image is missing", async () => {
+    const state = createSandboxState();
+    const mockContainer = { id: "c1" } as unknown as Dockerode.Container;
+    const tmpDir = makeTempDir();
+
+    let sidecarImageChecked = false;
+
+    const result = await startSandboxContainer(
+      state,
+      {
+        docker: {} as Dockerode,
+        doesImageExistFn: (_docker, image) => {
+          if (image === "ghcr.io/sagernet/sing-box:v1.12.0") {
+            sidecarImageChecked = true;
+            return Promise.resolve(false);
+          }
+          return Promise.resolve(image === "alpine");
+        },
+        ensureContainerFn: () => Promise.resolve({ container: mockContainer, created: true }),
+        pullImageFn: () => Promise.resolve(),
+        ensureNetworkFn: () => Promise.resolve(),
+        ensureSidecarContainerFn: () => Promise.resolve({ container: { id: "s1" } as unknown as Dockerode.Container, created: true }),
+      },
+      { image: "alpine", env: {}, filesystem: { rw: [], ro: [] }, network: { domains: ["example.com"] } },
+      tmpDir,
+      "pi-sandbox-test",
+      tmpDir,
+    );
+
+    assert.strictEqual(result.kind, "pulling");
+    assert.strictEqual(sidecarImageChecked, true);
+
+    const outcome = await result.done;
+    assert.strictEqual(outcome.kind, "ready");
+  });
 });

@@ -137,6 +137,7 @@ export async function ensureContainer(
   config: SandboxConfig,
   workspaceAbsolutePath: string,
   containerName: string,
+  networkMode?: string,
 ): Promise<{ container: Dockerode.Container; created: boolean }> {
   const container = docker.getContainer(containerName);
   try {
@@ -159,7 +160,7 @@ export async function ensureContainer(
       Image: config.image,
       Cmd: ["sleep", "infinity"],
       HostConfig: {
-        NetworkMode: "none",
+        NetworkMode: networkMode ?? "none",
         CapDrop: ["ALL"],
         SecurityOpt: ["no-new-privileges:true"],
         Binds: buildBindMounts(config.filesystem, workspaceAbsolutePath),
@@ -226,6 +227,166 @@ export async function stopAndRemoveContainer(
     rethrowDockerDaemonError(err);
     throw err;
   }
+}
+
+export async function killContainer(docker: Dockerode, containerName: string): Promise<void> {
+  const container = docker.getContainer(containerName);
+  try {
+    await container.kill();
+  } catch (err) {
+    if (isDockerNotFound(err)) {
+      return;
+    }
+    rethrowDockerDaemonError(err);
+    // Ignore other errors (e.g., container already stopped)
+  }
+}
+
+export async function ensureNetwork(docker: Dockerode, networkName: string): Promise<void> {
+  const network = docker.getNetwork(networkName);
+  try {
+    await network.inspect();
+  } catch (err) {
+    if (!isDockerNotFound(err)) {
+      rethrowDockerDaemonError(err);
+      throw err;
+    }
+    try {
+      await docker.createNetwork({ Name: networkName, Driver: "bridge" });
+    } catch (createErr) {
+      if (!isDockerConflict(createErr)) {
+        rethrowDockerDaemonError(createErr);
+        throw createErr;
+      }
+    }
+  }
+}
+
+export async function ensureSidecarContainer(
+  docker: Dockerode,
+  sidecarImage: string,
+  sidecarName: string,
+  networkName: string,
+  configPath: string,
+): Promise<{ container: Dockerode.Container; created: boolean }> {
+  const container = docker.getContainer(sidecarName);
+  try {
+    const info = await container.inspect();
+    if (!info.State.Running) {
+      await container.start();
+    }
+    return { container, created: false };
+  } catch (err) {
+    if (!isDockerNotFound(err)) {
+      rethrowDockerDaemonError(err);
+      throw err;
+    }
+  }
+
+  try {
+    const newContainer = await docker.createContainer({
+      name: sidecarName,
+      Image: sidecarImage,
+      Cmd: ["run", "-c", "/etc/sing-box/config.json"],
+      HostConfig: {
+        NetworkMode: networkName,
+        CapAdd: ["NET_ADMIN"],
+        Devices: [{ PathOnHost: "/dev/net/tun", PathInContainer: "/dev/net/tun", CgroupPermissions: "rwm" }],
+        Binds: [`${configPath}:/etc/sing-box/config.json:ro`],
+      },
+    });
+    await newContainer.start();
+    return { container: newContainer, created: true };
+  } catch (err) {
+    if (!isDockerConflict(err)) {
+      rethrowDockerDaemonError(err);
+      throw err;
+    }
+  }
+
+  const existing = docker.getContainer(sidecarName);
+  const existingInfo = await existing.inspect();
+  if (!existingInfo.State.Running) {
+    await existing.start();
+  }
+  return { container: existing, created: false };
+}
+
+export async function stopAndRemoveSidecar(docker: Dockerode, sidecarName: string): Promise<void> {
+  await stopAndRemoveContainer(docker, sidecarName);
+}
+
+export async function isSidecarHealthy(docker: Dockerode, sidecarName: string): Promise<boolean> {
+  try {
+    const container = docker.getContainer(sidecarName);
+    const info = await container.inspect();
+    return info.State.Running;
+  } catch (err) {
+    if (isDockerNotFound(err) || err instanceof DockerDaemonUnreachableError) {
+      return false;
+    }
+    throw err;
+  }
+}
+
+export async function watchSidecarEvents(
+  docker: Dockerode,
+  sidecarName: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const opts = {
+      filters: JSON.stringify({
+        container: [sidecarName],
+        event: ["die", "stop", "kill", "oom"],
+      }),
+    };
+
+    docker.getEvents(opts, (err, stream) => {
+      if (err) {
+        reject(err instanceof Error ? err : new Error(String(err)));
+        return;
+      }
+      if (!stream) {
+        reject(new Error("No event stream"));
+        return;
+      }
+
+      const readableStream = stream as unknown as import("stream").Readable;
+
+      let resolved = false;
+      const cleanup = (): void => {
+        if (resolved) return;
+        resolved = true;
+        readableStream.destroy();
+      };
+
+      readableStream.on("data", () => {
+        cleanup();
+        resolve();
+      });
+      readableStream.on("end", () => {
+        cleanup();
+        resolve();
+      });
+      readableStream.on("error", (e) => {
+        cleanup();
+        if (signal?.aborted) {
+          resolve();
+        } else {
+          reject(e instanceof Error ? e : new Error(String(e)));
+        }
+      });
+
+      if (signal) {
+        const onAbort = (): void => {
+          cleanup();
+          resolve();
+        };
+        signal.addEventListener("abort", onAbort, { once: true });
+      }
+    });
+  });
 }
 
 function abortedResult(): ExecInContainerResult {

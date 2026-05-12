@@ -8,6 +8,14 @@ export function computeContainerName(workspaceAbsolutePath: string): string {
   return `pi-sandbox-${hash}`;
 }
 
+export function computeSidecarName(workspaceAbsolutePath: string): string {
+  return `${computeContainerName(workspaceAbsolutePath)}-egress`;
+}
+
+export function computeNetworkName(workspaceAbsolutePath: string): string {
+  return `${computeContainerName(workspaceAbsolutePath)}-net`;
+}
+
 export function computeConfigHash(config: SandboxConfig): string {
   return createHash("sha256").update(JSON.stringify(config)).digest("hex").slice(0, 16);
 }
@@ -34,7 +42,7 @@ function swallowEnoent(fn: () => void): void {
 
 export function releaseSessionRef(stateDir: string, sessionId: string): boolean {
   const sessionFile = `${stateDir}/sessions/${sessionId}`;
-  swallowEnoent(() => unlinkSync(sessionFile));
+  swallowEnoent(() => { unlinkSync(sessionFile); });
 
   try {
     const files = readdirSync(`${stateDir}/sessions`);
@@ -63,7 +71,7 @@ export function writeConfigHash(stateDir: string, configHash: string): void {
 }
 
 export function deleteConfigHash(stateDir: string): void {
-  swallowEnoent(() => unlinkSync(`${stateDir}/config-hash`));
+  swallowEnoent(() => { unlinkSync(`${stateDir}/config-hash`); });
 }
 
 export function countStaleRefs(stateDir: string): number {

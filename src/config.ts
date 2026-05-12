@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { expandTilde } from "./path.js";
+import { extractNetwork, type NetworkConfig } from "./network.js";
 
 export interface FilesystemConfig {
   rw: string[];
@@ -9,11 +10,13 @@ export interface FilesystemConfig {
 
 export interface SandboxConfig {
   image: string;
+  sidecarImage?: string;
   env: Record<string, string>;
   filesystem: FilesystemConfig;
+  network?: NetworkConfig;
 }
 
-const TOP_LEVEL_KEYS = new Set(["image", "env", "filesystem"]);
+const TOP_LEVEL_KEYS = new Set(["image", "env", "filesystem", "network", "sidecarImage"]);
 const FILESYSTEM_KEYS = new Set(["rw", "ro"]);
 
 function isObject(value: unknown): value is Record<string, unknown> {
@@ -167,6 +170,10 @@ export function validateConfig(config: SandboxConfig): void {
     throw new Error('Merged sandbox config must have a non-empty "image" string');
   }
 
+  if (config.sidecarImage !== undefined && (typeof config.sidecarImage !== "string" || config.sidecarImage.length === 0)) {
+    throw new Error('sidecarImage must be a non-empty string');
+  }
+
   for (const [key, value] of Object.entries(config.env)) {
     if (typeof value !== "string") {
       throw new Error(`env value for "${key}" must be a string, got ${typeof value}`);
@@ -196,6 +203,10 @@ export function mergeConfigs(globalRaw: unknown, workspaceRaw: unknown): { confi
   const workspaceFs = extractFilesystem(workspaceObj.filesystem, "workspace config#filesystem");
   warnings.push(...globalFs.warnings, ...workspaceFs.warnings);
 
+  const globalNetwork = extractNetwork(globalObj.network, "global config");
+  const workspaceNetwork = extractNetwork(workspaceObj.network, "workspace config");
+  warnings.push(...globalNetwork.warnings, ...workspaceNetwork.warnings);
+
   const image =
     typeof workspaceObj.image === "string" && workspaceObj.image.length > 0
       ? workspaceObj.image
@@ -203,17 +214,37 @@ export function mergeConfigs(globalRaw: unknown, workspaceRaw: unknown): { confi
         ? globalObj.image
         : "";
 
-  return {
-    config: {
-      image,
-      env: mergeStringMaps(globalEnv, workspaceEnv),
-      filesystem: {
-        rw: mergeStringLists(globalFs.config.rw, workspaceFs.config.rw),
-        ro: mergeStringLists(globalFs.config.ro, workspaceFs.config.ro),
-      },
+  const sidecarImage =
+    typeof workspaceObj.sidecarImage === "string" && workspaceObj.sidecarImage.length > 0
+      ? workspaceObj.sidecarImage
+      : typeof globalObj.sidecarImage === "string" && globalObj.sidecarImage.length > 0
+        ? globalObj.sidecarImage
+        : undefined;
+
+  let network: NetworkConfig | undefined;
+  if (workspaceObj.network !== undefined) {
+    network = workspaceNetwork.config;
+  } else if (globalObj.network !== undefined) {
+    network = globalNetwork.config;
+  }
+
+  const result: SandboxConfig = {
+    image,
+    env: mergeStringMaps(globalEnv, workspaceEnv),
+    filesystem: {
+      rw: mergeStringLists(globalFs.config.rw, workspaceFs.config.rw),
+      ro: mergeStringLists(globalFs.config.ro, workspaceFs.config.ro),
     },
-    warnings,
   };
+
+  if (sidecarImage !== undefined) {
+    result.sidecarImage = sidecarImage;
+  }
+  if (network !== undefined) {
+    result.network = network;
+  }
+
+  return { config: result, warnings };
 }
 
 export function loadConfig(workspacePath: string): { config: SandboxConfig; warnings: string[] } {

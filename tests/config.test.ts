@@ -100,6 +100,50 @@ describe("mergeConfigs", () => {
     assert.deepStrictEqual(config.filesystem.rw, [resolve(homedir(), ".pi/shared"), resolve(homedir(), "workspace")]);
     assert.deepStrictEqual(config.filesystem.ro, [homedir()]);
   });
+
+  it("uses workspace sidecarImage when present", () => {
+    const { config } = mergeConfigs({ image: "alpine", sidecarImage: "global-sidecar" }, { sidecarImage: "workspace-sidecar" });
+    assert.strictEqual(config.sidecarImage, "workspace-sidecar");
+  });
+
+  it("uses global sidecarImage when workspace is absent", () => {
+    const { config } = mergeConfigs({ image: "alpine", sidecarImage: "global-sidecar" }, {});
+    assert.strictEqual(config.sidecarImage, "global-sidecar");
+  });
+
+  it("omits sidecarImage when both missing", () => {
+    const { config } = mergeConfigs({ image: "alpine" }, {});
+    assert.strictEqual(config.sidecarImage, undefined);
+  });
+
+  it("replaces global network with workspace network", () => {
+    const { config } = mergeConfigs(
+      { image: "alpine", network: { domains: ["global.test"] } },
+      { image: "alpine", network: { domains: ["workspace.test"] } },
+    );
+    assert.deepStrictEqual(config.network, { domains: ["workspace.test"] });
+  });
+
+  it("uses global network when workspace is absent", () => {
+    const { config } = mergeConfigs(
+      { image: "alpine", network: { domains: ["global.test"] } },
+      {},
+    );
+    assert.deepStrictEqual(config.network, { domains: ["global.test"] });
+  });
+
+  it("omits network when workspace sets empty object to override global", () => {
+    const { config } = mergeConfigs(
+      { image: "alpine", network: { domains: ["global.test"] } },
+      { image: "alpine", network: {} },
+    );
+    assert.strictEqual(config.network, undefined);
+  });
+
+  it("omits network when both absent", () => {
+    const { config } = mergeConfigs({ image: "alpine" }, {});
+    assert.strictEqual(config.network, undefined);
+  });
 });
 
 describe("validateConfig", () => {

@@ -59,7 +59,7 @@ function createMockCtx(
   cwd: string,
   notifications?: { message: string; type: string }[],
   sessionDir?: string,
-  sessionId: string = "test-session-id",
+  sessionId = "test-session-id",
 ): ExtensionContext {
   return {
     cwd,

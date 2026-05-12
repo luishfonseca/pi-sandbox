@@ -12,6 +12,12 @@ import {
   pullImage,
   stopAndRemoveContainer,
   getContainerStatus,
+  ensureNetwork,
+  ensureSidecarContainer,
+  stopAndRemoveSidecar,
+  isSidecarHealthy,
+  watchSidecarEvents,
+  killContainer,
 } from "./docker.js";
 import { bashSchema, createBashToolHandler, createEnsureConnected } from "./bash.js";
 
@@ -19,6 +25,7 @@ import { createSandboxState, type SandboxState, Mutex } from "./state.js";
 import {
   computeContainerName,
   computeConfigHash,
+  computeSidecarName,
   getStateDir,
   acquireSessionRef,
   releaseSessionRef,
@@ -27,6 +34,7 @@ import {
   countStaleRefs,
   resetState,
 } from "./lifecycle.js";
+import { hasNetworkPolicy } from "./network.js";
 
 export interface SandboxExtensionOptions {
   docker?: Dockerode;
@@ -37,6 +45,12 @@ export interface SandboxExtensionOptions {
   pullImageFn?: typeof pullImage;
   stopAndRemoveContainerFn?: typeof stopAndRemoveContainer;
   getContainerStatusFn?: typeof getContainerStatus;
+  ensureNetworkFn?: typeof ensureNetwork;
+  ensureSidecarContainerFn?: typeof ensureSidecarContainer;
+  stopAndRemoveSidecarFn?: typeof stopAndRemoveSidecar;
+  isSidecarHealthyFn?: typeof isSidecarHealthy;
+  watchSidecarEventsFn?: typeof watchSidecarEvents;
+  killContainerFn?: typeof killContainer;
 }
 
 export function createSandboxExtension(options: SandboxExtensionOptions = {}): (pi: ExtensionAPI) => void {
@@ -58,6 +72,12 @@ export function createSandboxExtension(options: SandboxExtensionOptions = {}): (
     const pullImageFn = options.pullImageFn ?? pullImage;
     const stopAndRemoveContainerFn = options.stopAndRemoveContainerFn ?? stopAndRemoveContainer;
     const getContainerStatusFn = options.getContainerStatusFn ?? getContainerStatus;
+    const ensureNetworkFn = options.ensureNetworkFn ?? ensureNetwork;
+    const ensureSidecarContainerFn = options.ensureSidecarContainerFn ?? ensureSidecarContainer;
+    const stopAndRemoveSidecarFn = options.stopAndRemoveSidecarFn ?? stopAndRemoveSidecar;
+    const isSidecarHealthyFn = options.isSidecarHealthyFn ?? isSidecarHealthy;
+    const watchSidecarEventsFn = options.watchSidecarEventsFn ?? watchSidecarEvents;
+    const killContainerFn = options.killContainerFn ?? killContainer;
 
     const state: SandboxState = createSandboxState();
     // In-memory lock for container lifecycle ops in THIS process only —
@@ -80,6 +100,10 @@ export function createSandboxExtension(options: SandboxExtensionOptions = {}): (
         const release = await lifecycleMutex.acquire();
         try {
           await stopAndRemoveContainerFn(docker, containerName);
+          if (state.config && hasNetworkPolicy(state.config)) {
+            const sidecarName = computeSidecarName(state.workspaceAbsolutePath);
+            await stopAndRemoveSidecarFn(docker, sidecarName);
+          }
           state.container = undefined;
           deleteConfigHash(stateDir);
         } finally {
@@ -107,6 +131,7 @@ export function createSandboxExtension(options: SandboxExtensionOptions = {}): (
 
       state.config = loadedConfig;
       state.workspaceAbsolutePath = workspacePath;
+      delete state.fatalError;
     });
 
     pi.on("tool_call", (event, _ctx) => {
@@ -193,6 +218,9 @@ export function createSandboxExtension(options: SandboxExtensionOptions = {}): (
             env: state.config?.env ?? {},
             filesystem: state.config?.filesystem ?? { rw: [], ro: [] },
           };
+          if (state.config?.network) {
+            effectiveConfig.network = state.config.network;
+          }
         }
 
         const configHash = computeConfigHash(effectiveConfig);
@@ -227,6 +255,17 @@ export function createSandboxExtension(options: SandboxExtensionOptions = {}): (
           configStaleness = `stale — running container was created with ${storedHash}`;
         }
 
+        let networkLines: string;
+        if (effectiveConfig.network === undefined || Object.keys(effectiveConfig.network).length === 0) {
+          networkLines = "Network: none";
+        } else {
+          const allow: string[] = [];
+          if (effectiveConfig.network.domains?.length) allow.push(...effectiveConfig.network.domains);
+          if (effectiveConfig.network.cidrs?.length) allow.push(...effectiveConfig.network.cidrs);
+          const deny = effectiveConfig.network.denyCidrs ?? [];
+          networkLines = `Network:\n  allow: ${allow.join(", ") || "(none)"}\n  deny: ${deny.join(", ") || "(none)"}`;
+        }
+
         const lines = [
           "Sandbox status:",
           `Workspace: ${workspacePath}`,
@@ -236,6 +275,7 @@ export function createSandboxExtension(options: SandboxExtensionOptions = {}): (
           "Filesystem:",
           `  rw: ${effectiveConfig.filesystem.rw.join(", ") || "(none)"}`,
           `  ro: ${effectiveConfig.filesystem.ro.join(", ") || "(none)"}`,
+          networkLines,
           `Sessions: ${String(sessionIds.length)} active (${sessionIds.slice(0, 10).join(", ")}${sessionIds.length > 10 ? ", ..." : ""})`,
         ];
 
@@ -277,7 +317,12 @@ export function createSandboxExtension(options: SandboxExtensionOptions = {}): (
         const release = await lifecycleMutex.acquire();
         try {
           await stopAndRemoveContainerFn(docker, containerName);
+          if (state.config && hasNetworkPolicy(state.config)) {
+            const sidecarName = computeSidecarName(workspacePath);
+            await stopAndRemoveSidecarFn(docker, sidecarName);
+          }
           state.container = undefined;
+          delete state.fatalError;
           state.pull.isPulling = false;
           state.pull.error = undefined;
           resetState(stateDir);
@@ -292,7 +337,7 @@ export function createSandboxExtension(options: SandboxExtensionOptions = {}): (
     const ensureConnected = createEnsureConnected({
       state,
       lifecycleMutex,
-      startDeps: { docker, doesImageExistFn, ensureContainerFn, pullImageFn },
+      startDeps: { docker, doesImageExistFn, ensureContainerFn, pullImageFn, ensureNetworkFn, ensureSidecarContainerFn },
       acquireSessionRef,
     });
 
@@ -307,6 +352,10 @@ export function createSandboxExtension(options: SandboxExtensionOptions = {}): (
         state,
         execInContainerFn,
         ensureConnected,
+        docker,
+        isSidecarHealthyFn,
+        watchSidecarEventsFn,
+        killContainerFn,
       }),
     });
   };

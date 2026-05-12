@@ -7,12 +7,13 @@ import {
   formatSize,
 } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
-import { execInContainer, DockerDaemonUnreachableError, isDockerNotFound } from "./docker.js";
-import type Dockerode from "dockerode";
+import Dockerode from "dockerode";
+import { execInContainer, DockerDaemonUnreachableError, isSidecarHealthy, watchSidecarEvents, killContainer } from "./docker.js";
 import type { SandboxState, Mutex } from "./state.js";
 import type { StartSandboxDependencies } from "./start-container.js";
 import { startSandboxContainer } from "./start-container.js";
-import { computeContainerName, getStateDir } from "./lifecycle.js";
+import { computeContainerName, computeSidecarName, getStateDir } from "./lifecycle.js";
+import { hasNetworkPolicy } from "./network.js";
 
 export const bashSchema = Type.Object({
   command: Type.String({ description: "Bash command to execute" }),
@@ -27,6 +28,12 @@ export interface BashToolDependencies {
   state: SandboxState;
   execInContainerFn: typeof execInContainer;
   ensureConnected: (ctx: ExtensionContext) => Promise<{ container: Dockerode.Container } | { error: string }>;
+  docker: Dockerode;
+  isSidecarHealthyFn?: typeof isSidecarHealthy;
+  watchSidecarEventsFn?: typeof watchSidecarEvents;
+  killContainerFn?: typeof killContainer;
+  computeSidecarNameFn?: typeof computeSidecarName;
+  computeContainerNameFn?: typeof computeContainerName;
 }
 
 export interface EnsureConnectedOptions {
@@ -41,7 +48,7 @@ async function isHealthy(container: Dockerode.Container): Promise<boolean> {
     const info = await container.inspect();
     return info.State.Running;
   } catch (err) {
-    if (isDockerNotFound(err) || err instanceof DockerDaemonUnreachableError) {
+    if ((err as { statusCode?: number }).statusCode === 404 || err instanceof DockerDaemonUnreachableError) {
       return false;
     }
     throw err;
@@ -55,6 +62,10 @@ export function createEnsureConnected(options: EnsureConnectedOptions): (
     const workspaceAbsolutePath = options.state.workspaceAbsolutePath;
     if (workspaceAbsolutePath === undefined || options.state.config === undefined) {
       return { error: "Sandbox not initialized" };
+    }
+
+    if (options.state.fatalError) {
+      return { error: options.state.fatalError };
     }
 
     const stateDir = getStateDir(ctx.sessionManager.getSessionDir());
@@ -126,6 +137,14 @@ export function createBashToolHandler(deps: BashToolDependencies): (
       return deps.localBash.execute(toolCallId, params, signal, onUpdate);
     }
 
+    if (deps.state.fatalError) {
+      return {
+        content: [{ type: "text" as const, text: deps.state.fatalError }],
+        details: { error: deps.state.fatalError },
+        isError: true,
+      };
+    }
+
     if (deps.state.pull.isPulling) {
       return {
         content: [
@@ -159,6 +178,20 @@ export function createBashToolHandler(deps: BashToolDependencies): (
       };
     }
 
+    // Pre-command sidecar health check
+    if (deps.state.config && hasNetworkPolicy(deps.state.config)) {
+      const sidecarName = (deps.computeSidecarNameFn ?? computeSidecarName)(workspaceAbsolutePath);
+      const healthy = await (deps.isSidecarHealthyFn ?? isSidecarHealthy)(deps.docker, sidecarName);
+      if (!healthy) {
+        deps.state.fatalError = "Egress sidecar is not healthy. Run /sandbox-reset to recreate the sandbox.";
+        return {
+          content: [{ type: "text" as const, text: deps.state.fatalError }],
+          details: { error: deps.state.fatalError },
+          isError: true,
+        };
+      }
+    }
+
     try {
       let timeout: number | undefined;
       if (
@@ -178,9 +211,45 @@ export function createBashToolHandler(deps: BashToolDependencies): (
       if (timeout !== undefined) {
         execOptions.timeout = timeout;
       }
-      const result = await deps.execInContainerFn(container, execOptions);
 
-      const combinedOutput = result.stdout + result.stderr;
+      let sidecarDeathPromise: Promise<void> | undefined;
+      let sidecarAbortController: AbortController | undefined;
+
+      if (deps.state.config && hasNetworkPolicy(deps.state.config)) {
+        const sidecarName = (deps.computeSidecarNameFn ?? computeSidecarName)(workspaceAbsolutePath);
+        sidecarAbortController = new AbortController();
+        sidecarDeathPromise = (deps.watchSidecarEventsFn ?? watchSidecarEvents)(deps.docker, sidecarName, sidecarAbortController.signal);
+      }
+
+      const execPromise = deps.execInContainerFn(container, execOptions);
+
+      let execResult: import("./docker.js").ExecInContainerResult;
+
+      if (sidecarDeathPromise) {
+        const execWrapped = execPromise.then((r) => ({ type: "exec" as const, result: r }));
+        const sidecarWrapped = sidecarDeathPromise.then(() => ({ type: "sidecar" as const }));
+
+        const race = await Promise.race([execWrapped, sidecarWrapped]);
+
+        if (race.type === "sidecar") {
+          const appName = (deps.computeContainerNameFn ?? computeContainerName)(workspaceAbsolutePath);
+          await (deps.killContainerFn ?? killContainer)(deps.docker, appName);
+          try { await execPromise; } catch { /* ignore */ }
+          deps.state.fatalError = "Egress sidecar died during command execution. Run /sandbox-reset to recreate the sandbox.";
+          return {
+            content: [{ type: "text" as const, text: deps.state.fatalError }],
+            details: { error: deps.state.fatalError },
+            isError: true,
+          };
+        }
+
+        sidecarAbortController?.abort();
+        execResult = race.result;
+      } else {
+        execResult = await execPromise;
+      }
+
+      const combinedOutput = execResult.stdout + execResult.stderr;
       const truncation = truncateTail(combinedOutput, {
         maxLines: DEFAULT_MAX_LINES,
         maxBytes: DEFAULT_MAX_BYTES,
@@ -190,34 +259,34 @@ export function createBashToolHandler(deps: BashToolDependencies): (
         text += `\n\n[Output truncated: ${String(truncation.outputLines)} of ${String(truncation.totalLines)} lines (${formatSize(truncation.outputBytes)} of ${formatSize(truncation.totalBytes)}).]`;
       }
 
-      if (result.aborted) {
+      if (execResult.aborted) {
         text += "\n\nCommand aborted";
         return {
           content: [{ type: "text" as const, text }],
           details: {
             exitCode: null,
-            stdout: result.stdout,
-            stderr: result.stderr,
+            stdout: execResult.stdout,
+            stderr: execResult.stderr,
           },
           isError: true,
         };
       }
 
-      if (result.timedOut) {
+      if (execResult.timedOut) {
         text += `\n\nCommand timed out after ${String(timeout)} seconds`;
         return {
           content: [{ type: "text" as const, text }],
           details: {
             exitCode: null,
-            stdout: result.stdout,
-            stderr: result.stderr,
+            stdout: execResult.stdout,
+            stderr: execResult.stderr,
           },
           isError: true,
         };
       }
 
-      if (result.exitCode !== 0 && result.exitCode !== null) {
-        text += `\n\nCommand exited with code ${String(result.exitCode)}`;
+      if (execResult.exitCode !== 0 && execResult.exitCode !== null) {
+        text += `\n\nCommand exited with code ${String(execResult.exitCode)}`;
       }
       if (!text) {
         text = "(no output)";
@@ -225,11 +294,11 @@ export function createBashToolHandler(deps: BashToolDependencies): (
       return {
         content: [{ type: "text" as const, text }],
         details: {
-          exitCode: result.exitCode,
-          stdout: result.stdout,
-          stderr: result.stderr,
+          exitCode: execResult.exitCode,
+          stdout: execResult.stdout,
+          stderr: execResult.stderr,
         },
-        isError: result.exitCode !== 0,
+        isError: execResult.exitCode !== 0,
       };
     } catch (err) {
       if (err instanceof DockerDaemonUnreachableError) {
