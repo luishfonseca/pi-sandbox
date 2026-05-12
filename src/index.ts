@@ -60,6 +60,8 @@ export function createSandboxExtension(options: SandboxExtensionOptions = {}): (
     const getContainerStatusFn = options.getContainerStatusFn ?? getContainerStatus;
 
     const state: SandboxState = createSandboxState();
+    // In-memory lock for container lifecycle ops in THIS process only —
+    // not a cross-session inter-process lock. See Mutex JSDoc for details.
     const lifecycleMutex = new Mutex();
 
     pi.on("session_shutdown", async (_event, ctx) => {
