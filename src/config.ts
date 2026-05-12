@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { expandTilde } from "./path.js";
-import { extractNetwork, type NetworkConfig } from "./network.js";
+import { extractNetwork, type NetworkConfig, checkBuiltInDenyOverlaps } from "./network.js";
 
 export interface FilesystemConfig {
   rw: string[];
@@ -214,18 +214,24 @@ export function mergeConfigs(globalRaw: unknown, workspaceRaw: unknown): { confi
         ? globalObj.image
         : "";
 
+  if (workspaceObj.sidecarImage !== undefined) {
+    warnings.push("[pi-sandbox] sidecarImage in workspace config is ignored; set it in global config only");
+  }
+
   const sidecarImage =
-    typeof workspaceObj.sidecarImage === "string" && workspaceObj.sidecarImage.length > 0
-      ? workspaceObj.sidecarImage
-      : typeof globalObj.sidecarImage === "string" && globalObj.sidecarImage.length > 0
-        ? globalObj.sidecarImage
-        : undefined;
+    typeof globalObj.sidecarImage === "string" && globalObj.sidecarImage.length > 0
+      ? globalObj.sidecarImage
+      : undefined;
 
   let network: NetworkConfig | undefined;
   if (workspaceObj.network !== undefined) {
     network = workspaceNetwork.config;
   } else if (globalObj.network !== undefined) {
     network = globalNetwork.config;
+  }
+
+  if (network !== undefined) {
+    warnings.push(...checkBuiltInDenyOverlaps(network));
   }
 
   const result: SandboxConfig = {

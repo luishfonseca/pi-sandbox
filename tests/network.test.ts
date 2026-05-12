@@ -100,10 +100,8 @@ describe("extractNetwork", () => {
     assert.deepStrictEqual(r.config, { domains: ["example.com"], cidrs: ["1.1.1.1/32"], denyCidrs: ["10.0.0.0/8"] });
   });
 
-  it("warns on unknown keys", () => {
-    const r = extractNetwork({ foo: "bar" }, "test");
-    assert.strictEqual(r.warnings.length, 1);
-    assert.ok(r.warnings[0]?.includes("Unknown key"));
+  it("throws on unknown keys", () => {
+    assert.throws(() => extractNetwork({ foo: "bar" }, "test"), /Unknown key/);
   });
 
   it("throws on non-array domains", () => {
@@ -175,17 +173,39 @@ describe("generateSingBoxConfig", () => {
   it("sorts deny cidrs before allow cidrs at same prefix length", () => {
     const config = generateSingBoxConfig({ cidrs: ["192.0.2.0/24"], denyCidrs: ["192.0.2.0/24"] }) as { route: { rules: unknown[] } };
     const cidrRules = config.route.rules.filter((r: unknown) => (r as Record<string, unknown>).ip_cidr !== undefined);
-    assert.strictEqual((cidrRules[0] as Record<string, unknown>).action, "reject");
-    assert.strictEqual((cidrRules[1] as Record<string, unknown>).action, "route");
+    const idxDeny = cidrRules.findIndex((r: unknown) => ((r as Record<string, unknown>).ip_cidr as string[]).includes("192.0.2.0/24") && (r as Record<string, unknown>).action === "reject");
+    const idxAllow = cidrRules.findIndex((r: unknown) => ((r as Record<string, unknown>).ip_cidr as string[]).includes("192.0.2.0/24") && (r as Record<string, unknown>).action === "route");
+    assert.ok(idxDeny !== -1, "deny rule not found");
+    assert.ok(idxAllow !== -1, "allow rule not found");
+    assert.ok(idxDeny < idxAllow, "deny should precede allow at same prefix");
   });
 
   it("sorts cidrs by prefix length descending", () => {
     const config = generateSingBoxConfig({ cidrs: ["192.0.2.0/16", "192.0.2.0/24"] }) as { route: { rules: unknown[] } };
     const cidrRules = config.route.rules.filter((r: unknown) => (r as Record<string, unknown>).ip_cidr !== undefined);
-    const firstPrefix = Number(((cidrRules[0] as Record<string, unknown>).ip_cidr as string[])[0]?.split("/")[1]);
-    const secondPrefix = Number(((cidrRules[1] as Record<string, unknown>).ip_cidr as string[])[0]?.split("/")[1]);
-    assert.strictEqual(firstPrefix, 24);
-    assert.strictEqual(secondPrefix, 16);
+    const idx24 = cidrRules.findIndex((r: unknown) => ((r as Record<string, unknown>).ip_cidr as string[]).includes("192.0.2.0/24"));
+    const idx16 = cidrRules.findIndex((r: unknown) => ((r as Record<string, unknown>).ip_cidr as string[]).includes("192.0.2.0/16"));
+    assert.ok(idx24 !== -1, "/24 rule not found");
+    assert.ok(idx16 !== -1, "/16 rule not found");
+    assert.ok(idx24 < idx16, "longer prefix (/24) should precede shorter prefix (/16)");
+  });
+
+  it("includes built-in private range deny CIDRs", () => {
+    const config = generateSingBoxConfig({}) as { route: { rules: unknown[] } };
+    const cidrRules = config.route.rules.filter((r: unknown) => (r as Record<string, unknown>).ip_cidr !== undefined);
+    const hasPrivateDeny = cidrRules.some((r: unknown) =>
+      ((r as Record<string, unknown>).ip_cidr as string[]).includes("10.0.0.0/8") && (r as Record<string, unknown>).action === "reject",
+    );
+    assert.strictEqual(hasPrivateDeny, true);
+  });
+
+  it("includes IPv6 deny-all CIDR", () => {
+    const config = generateSingBoxConfig({}) as { route: { rules: unknown[] } };
+    const cidrRules = config.route.rules.filter((r: unknown) => (r as Record<string, unknown>).ip_cidr !== undefined);
+    const hasV6Deny = cidrRules.some((r: unknown) =>
+      ((r as Record<string, unknown>).ip_cidr as string[]).includes("::/0") && (r as Record<string, unknown>).action === "reject",
+    );
+    assert.strictEqual(hasV6Deny, true);
   });
 });
 

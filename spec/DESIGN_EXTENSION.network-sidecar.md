@@ -54,8 +54,8 @@ interface SandboxConfig {
   - `*.example.com` is translated to `domain_suffix: ".example.com"` and matches any subdomain but **not** the apex `example.com`.
 - `network.cidrs`, if present, MUST be an array of strings that each parse as a valid IPv4 CIDR block. Single IPs MUST be normalized to `"x.x.x.x/32"`.
 - `network.denyCidrs`, if present, MUST be an array of strings that each parse as a valid IPv4 CIDR block. Single IPs MUST be normalized to `"x.x.x.x/32"`.
-- `sidecarImage`, if present, MUST be a non-empty string in Docker image-reference format (name[:tag] or name@digest). It follows scalar replacement merge semantics.
-- Unknown keys inside `network` MUST be ignored with a warning.
+- `sidecarImage`, if present in global config, MUST be a non-empty string in Docker image-reference format (name[:tag] or name@digest). It is global-config only; workspace config MUST NOT set it (ignored with a warning if present).
+- Unknown keys inside `network` MUST be treated as a validation error.
 
 ### 2.2 Merge Rules
 
@@ -157,7 +157,7 @@ docker network create pi-sandbox-{workspaceHash}-net
 
 ### 3.3 sing-box Sidecar Specification
 
-**Image:** The effective sidecar image is `sidecarImage` from the merged config (default: `ghcr.io/sagernet/sing-box:v1.12.0`). Pulled lazily using the same async-pull logic as the app sandbox image. The project test suite MUST include a test that generates a sing-box config from a representative `NetworkConfig` and validates it with `sing-box check -c` using the matching pinned sidecar image version, to catch schema drift (e.g. the `predefined` server type and `protocol: dns` matchers that existed in earlier drafts are invalid in v1.12).
+**Image:** The effective sidecar image is `sidecarImage` from the global config (default: `ghcr.io/sagernet/sing-box:v1.12.0`). Pulled lazily using the same async-pull logic as the app sandbox image. The project test suite MUST include a test that generates a sing-box config from a representative `NetworkConfig` and validates it with `sing-box check -c` using the matching pinned sidecar image version, to catch schema drift (e.g. the `predefined` server type and `protocol: dns` matchers that existed in earlier drafts are invalid in v1.12).
 
 **Capabilities:** `NET_ADMIN` MUST be added. The sidecar MUST be started with `--device /dev/net/tun` so sing-box can create and configure the TUN interface.
 
@@ -332,6 +332,8 @@ Add to `DESIGN.md Sec. 7` "Known limitations":
 - **Do not** share the sing-box sidecar across different workspaces.
 - **Do not** fallback to `NetworkMode: "none"` when the sidecar fails to start. Fail fast.
 - **Do not** implement runtime sidecar health auto-recovery (e.g., restarting sing-box and reconnecting the app). Require explicit `/sandbox-reset`.
+
+**EXTENSION POINT:** A future revision may add a Clash API health check (e.g., `GET /` with a bearer token) to `isSidecarHealthy`, replacing the coarse `docker inspect` check. This requires injecting an API secret into the generated sing-box config and is deferred until needed.
 - **Do not** support Windows natively (unchanged from v1).
 
 ---

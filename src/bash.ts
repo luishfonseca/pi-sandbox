@@ -178,20 +178,6 @@ export function createBashToolHandler(deps: BashToolDependencies): (
       };
     }
 
-    // Pre-command sidecar health check
-    if (deps.state.config && hasNetworkPolicy(deps.state.config)) {
-      const sidecarName = (deps.computeSidecarNameFn ?? computeSidecarName)(workspaceAbsolutePath);
-      const healthy = await (deps.isSidecarHealthyFn ?? isSidecarHealthy)(deps.docker, sidecarName);
-      if (!healthy) {
-        deps.state.fatalError = "Egress sidecar is not healthy. Run /sandbox-reset to recreate the sandbox.";
-        return {
-          content: [{ type: "text" as const, text: deps.state.fatalError }],
-          details: { error: deps.state.fatalError },
-          isError: true,
-        };
-      }
-    }
-
     try {
       let timeout: number | undefined;
       if (
@@ -217,8 +203,22 @@ export function createBashToolHandler(deps: BashToolDependencies): (
 
       if (deps.state.config && hasNetworkPolicy(deps.state.config)) {
         const sidecarName = (deps.computeSidecarNameFn ?? computeSidecarName)(workspaceAbsolutePath);
+
+        // Start the watcher BEFORE the point-in-time health check to close the
+        // race window where the sidecar dies between inspection and subscription.
         sidecarAbortController = new AbortController();
         sidecarDeathPromise = (deps.watchSidecarEventsFn ?? watchSidecarEvents)(deps.docker, sidecarName, sidecarAbortController.signal);
+
+        const healthy = await (deps.isSidecarHealthyFn ?? isSidecarHealthy)(deps.docker, sidecarName);
+        if (!healthy) {
+          sidecarAbortController.abort();
+          deps.state.fatalError = "Egress sidecar is not healthy. Run /sandbox-reset to recreate the sandbox.";
+          return {
+            content: [{ type: "text" as const, text: deps.state.fatalError }],
+            details: { error: deps.state.fatalError },
+            isError: true,
+          };
+        }
       }
 
       const execPromise = deps.execInContainerFn(container, execOptions);

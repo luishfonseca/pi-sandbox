@@ -101,9 +101,10 @@ describe("mergeConfigs", () => {
     assert.deepStrictEqual(config.filesystem.ro, [homedir()]);
   });
 
-  it("uses workspace sidecarImage when present", () => {
-    const { config } = mergeConfigs({ image: "alpine", sidecarImage: "global-sidecar" }, { sidecarImage: "workspace-sidecar" });
-    assert.strictEqual(config.sidecarImage, "workspace-sidecar");
+  it("ignores workspace sidecarImage and uses global", () => {
+    const { config, warnings } = mergeConfigs({ image: "alpine", sidecarImage: "global-sidecar" }, { sidecarImage: "workspace-sidecar" });
+    assert.strictEqual(config.sidecarImage, "global-sidecar");
+    assert.ok(warnings.some((w) => w.includes("sidecarImage in workspace config is ignored")));
   });
 
   it("uses global sidecarImage when workspace is absent", () => {
@@ -143,6 +144,15 @@ describe("mergeConfigs", () => {
   it("omits network when both absent", () => {
     const { config } = mergeConfigs({ image: "alpine" }, {});
     assert.strictEqual(config.network, undefined);
+  });
+
+  it("warns when user cidrs match a built-in private-range deny", () => {
+    const { config, warnings } = mergeConfigs(
+      { image: "alpine" },
+      { image: "alpine", network: { cidrs: ["10.0.0.0/8"] } },
+    );
+    assert.deepStrictEqual(config.network, { cidrs: ["10.0.0.0/8"] });
+    assert.ok(warnings.some((w) => w.includes("matches a built-in private-range deny")));
   });
 });
 

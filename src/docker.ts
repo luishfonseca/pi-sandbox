@@ -293,6 +293,9 @@ export async function ensureSidecarContainer(
         CapAdd: ["NET_ADMIN"],
         Devices: [{ PathOnHost: "/dev/net/tun", PathInContainer: "/dev/net/tun", CgroupPermissions: "rwm" }],
         Binds: [`${configPath}:/etc/sing-box/config.json:ro`],
+        SecurityOpt: ["no-new-privileges:true"],
+        ReadonlyRootfs: true,
+        Tmpfs: { "/tmp": "rw,noexec,nosuid,size=10m" },
       },
     });
     await newContainer.start();
@@ -371,11 +374,10 @@ export async function watchSidecarEvents(
       });
       readableStream.on("error", (e) => {
         cleanup();
-        if (signal?.aborted) {
-          resolve();
-        } else {
-          reject(e instanceof Error ? e : new Error(String(e)));
-        }
+        // Fail-closed: stream errors mean we lost visibility into sidecar state.
+        // Treat them the same as a sidecar death event (caller will kill the app).
+        // If we intentionally aborted the stream after exec won, resolve harmlessly.
+        resolve();
       });
 
       if (signal) {
