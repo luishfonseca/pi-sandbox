@@ -51,31 +51,27 @@ The hash covers the effective merged config (§3.3). It is computed during sessi
 ### 2.4 Session Start
 
 **Precondition:** Docker daemon is reachable.  
-**Postcondition:** The sandbox container is running (or image pull is in progress), and the current session is registered as a user of that container.
+**Postcondition:** The current session is registered as a user of the workspace-scoped container. The container itself is started lazily on the first `bash` tool call, not during session start.
 
 ```
 1. Resolve workspaceAbsolutePath ← fs.realpathSync(ctx.cwd).
-2. Compute containerName (§2.1) and configHash (§2.3).
+2. Compute configHash (§2.3).
 3. Compute stateDir from ctx.sessionManager.getSessionDir() (§2.2).
-4. Acquire session reference:
-   mkdirSync(`${stateDir}/sessions/`, { recursive: true })
-   writeFileSync(`${stateDir}/sessions/{sessionId}`, "")
-5. Check if the Docker image exists locally.
-   If missing: start async pull (same as DESIGN.md §6.1 step 6).
-6. If the image exists, ensure the container is running:
-   - If a container with containerName exists and is running:
-     * Read `${stateDir}/config-hash`. If it differs from configHash,
-       emit a warning via ctx.ui.notify:
-       "Sandbox config has changed. Run /sandbox-reset to recreate."
-     * Reuse the container.
-   - If it exists but is stopped, start it.
-   - If it does not exist, create and start it via dockerode
-     (same HostConfig/Env/WorkingDir as DESIGN.md §6.1).
-     After start(), write configHash to `${stateDir}/config-hash`.
-7. Mark session ready.
+4. Load and validate the merged config.
+5. Mark session ready.
 ```
 
-**Race safety:** Two sessions starting concurrently in the same workspace both write their reference file before any container operation. If both attempt `docker.createContainer` with the same name, Docker rejects the second with a name-conflict error; the second session falls back to `container.start()` or reuse.
+**Note:** `session_start` does not acquire a session reference. A session only becomes a refcounted container user when it triggers lazy connection via a `bash` tool call.
+
+**Lazy connection.** The container is not created or started during `session_start`. The first `bash` tool call in any session triggers the connection under a per-workspace mutex. The connection logic is identical to the previous eager start:
+- If the image is missing, an async pull begins.
+- If the container exists and is running, it is reused.
+- If the container exists but is stopped, it is started.
+- If the container does not exist, it is created and started.
+- After creation, the current config hash is written to `${stateDir}/config-hash`.
+- The session reference is acquired during lazy connect. This is the only place refcount state is written; `session_start` does not touch the refcount.
+
+**Race safety:** Two sessions starting concurrently in the same workspace both write their reference file. The first `bash` call from either session acquires the lifecycle mutex and creates/starts the container. Subsequent `bash` calls see the healthy container and reuse it. If both attempt `docker.createContainer` with the same name, Docker rejects the second with a name-conflict error; the second falls back to `container.start()` or reuse.
 
 ### 2.5 Session Shutdown
 
@@ -98,7 +94,7 @@ The hash covers the effective merged config (§3.3). It is computed during sessi
 
 ### 2.6 Config Staleness Detection
 
-When reusing a running container (§2.4 step 6), the extension compares the stored config hash with the current effective config hash.
+When a `bash` call triggers lazy connection and reuses an existing container, `startSandboxContainer` compares the stored config hash with the current effective config hash.
 
 - **Match:** No action.
 - **Mismatch:** Emit a warning notification. Do **not** stop or recreate the container automatically. Recreation is triggered by the `/sandbox-reset` command (§2.7).
@@ -110,7 +106,7 @@ The staleness state is reported by `/sandbox-status`.
 ### 2.7 `/sandbox-reset` Command
 
 **Registered as:** `pi.registerCommand("sandbox-reset", { ... })`  
-**Description:** Force-stop and remove the workspace sandbox container, clearing all refcount state. Users may run `/sandbox-status` before `/sandbox-reset` to inspect the current container, refcount, and config state.
+**Description:** Force-stop and remove the workspace sandbox container, clearing all refcount state. Users may run `/sandbox-status` before `/sandbox-reset` to inspect the current container, refcount, and config state. The container is recreated lazily on the next `bash` tool call, not inline during the reset command.
 
 **Handler behavior:**
 
@@ -120,12 +116,10 @@ The staleness state is reported by `/sandbox-status`.
 3. Count stale reference files:
    stale = readdirSync(`${stateDir}/sessions/`).length
 4. Stop and remove the container named containerName (force: true).
-5. Delete `${stateDir}/config-hash`.
-6. Delete all files in `${stateDir}/sessions/`.
-7. Re-acquire a session reference for the current session.
-8. Recreate and start the sandbox container with the current config.
-9. Write the current config hash to `${stateDir}/config-hash`.
-10. Notify the user:
+5. Clear in-memory container reference and pull state.
+6. Delete `${stateDir}/config-hash`.
+7. Delete all files in `${stateDir}/sessions/`.
+8. Notify the user:
     "Reset sandbox container. Removed {stale} stale session reference(s)."
 ```
 
@@ -133,14 +127,11 @@ The staleness state is reported by `/sandbox-status`.
 - Container does not exist or is already removed → continue, do not fail.
 - `stateDir` does not exist → nothing to reset; notify "No sandbox state found."
 - Docker daemon unreachable → throw / surface error to user.
-- Container recreation fails → notify a warning, but the reset itself does not fail.
 
 **Postcondition:**
 - The previous container (if any) has been stopped and removed.
 - All refcount state (`${stateDir}/sessions/*` and `${stateDir}/config-hash`) has been deleted.
-- A fresh container is created and started **inline** during the command handler (not deferred to a future session start).
-- The current session holds an active reference file in the recreated state directory.
-- The current config hash is written to `${stateDir}/config-hash`.
+- A fresh container will be created lazily on the next `bash` tool call from any session in this workspace.
 - If the effective config is unavailable because `session_start` has not yet run in this extension instance, state is cleared but no container is recreated.
 
 ---
@@ -152,8 +143,10 @@ The staleness state is reported by `/sandbox-status`.
 ```
 Session A starts in /home/user/project
   containerName = pi-sandbox-a1b2c3d4e5f67890
-  Writes {sessionDir}/.sandbox/sessions/{sessionId-A}
-  Creates and starts container; writes config-hash.
+  Loads config; warns if stored config-hash is stale.
+Session A calls bash
+  Acquires session reference.
+  Container does not exist → creates and starts it; writes config-hash.
 Session A ends
   Deletes reference file.
   Sessions dir is empty → stops and removes container.
@@ -163,10 +156,14 @@ Session A ends
 
 ```
 Session A starts
-  Creates reference file A.
-  Creates container.
+  Loads config.
 Session B starts (same workspace)
-  Creates reference file B.
+  Loads config.
+Session A calls bash
+  Acquires reference file A.
+  Container does not exist → creates and starts it; writes config-hash.
+Session B calls bash
+  Acquires reference file B.
   Container already running → reuses it.
 Session A ends
   Deletes reference file A.
@@ -180,15 +177,18 @@ Session B ends
 
 ```
 Session A starts with config C1
+  Loads config.
+Session A calls bash
   Creates container, writes hash(C1) to config-hash.
 User edits sandbox.json → config C2
 Session B starts (same workspace)
-  Container already running.
+  Loads config C2.
   Reads stored config-hash: hash(C1).
   Current configHash: hash(C2).
   Mismatch → emits warning:
     "Sandbox config has changed. Run /sandbox-reset to recreate."
-  Reuses the container anyway.
+Session B calls bash
+  Container already running → reuses it.
 ```
 
 ---
@@ -221,6 +221,6 @@ Replace DESIGN.md §6.1 with §2.4 above.
 Replace DESIGN.md §6.2 with §2.5 above.  
 Replace extension point 8 in DESIGN.md §9 with:
 
-> **8. `/sandbox-reset` command.** A registered command that force-stops and removes the workspace sandbox container, clearing all refcount state, and recreates a fresh container for the current session. It is also used to recover from stale reference files after a crash. Specified in [DESIGN_EXTENSION.workspace-scoped.md](DESIGN_EXTENSION.workspace-scoped.md) §2.7.
+> **8. `/sandbox-reset` command.** A registered command that force-stops and removes the workspace sandbox container, clearing all refcount state. The container is recreated lazily on the next `bash` tool call. It is also used to recover from stale reference files after a crash. Specified in [DESIGN_EXTENSION.workspace-scoped.md](DESIGN_EXTENSION.workspace-scoped.md) §2.7.
 
 Update DESIGN.md §7 "Filesystem hygiene" row with the "After" column from §5 above.

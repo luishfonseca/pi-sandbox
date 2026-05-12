@@ -8,7 +8,11 @@ import {
 } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 import { execInContainer, DockerDaemonUnreachableError, isDockerNotFound } from "./docker.js";
-import type { SandboxState } from "./state.js";
+import type Dockerode from "dockerode";
+import type { SandboxState, Mutex } from "./state.js";
+import type { StartSandboxDependencies } from "./start-container.js";
+import { startSandboxContainer } from "./start-container.js";
+import { computeContainerName, getStateDir } from "./lifecycle.js";
 
 export const bashSchema = Type.Object({
   command: Type.String({ description: "Bash command to execute" }),
@@ -22,6 +26,10 @@ export interface BashToolDependencies {
   localBash: ReturnType<typeof createBashTool>;
   state: SandboxState;
   execInContainerFn: typeof execInContainer;
+  docker: Dockerode;
+  lifecycleMutex: Mutex;
+  startDeps: StartSandboxDependencies;
+  acquireSessionRef: (stateDir: string, sessionId: string) => void;
 }
 
 export function createBashToolHandler(deps: BashToolDependencies): (
@@ -55,55 +63,113 @@ export function createBashToolHandler(deps: BashToolDependencies): (
       };
     }
 
-    const container = deps.state.container;
+    let container = deps.state.container;
     const workspaceAbsolutePath = deps.state.workspaceAbsolutePath;
 
-    if (container === undefined || workspaceAbsolutePath === undefined) {
-      const pullError = deps.state.pull.error;
-      if (pullError) {
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: `Sandbox unavailable: ${pullError}`,
-            },
-          ],
-          details: { error: pullError },
-          isError: true,
-        };
+    if (workspaceAbsolutePath === undefined || deps.state.config === undefined) {
+      return {
+        content: [{ type: "text" as const, text: "Sandbox not initialized" }],
+        details: { error: "Sandbox not initialized" },
+        isError: true,
+      };
+    }
+
+    // Every bash call from an initialized session registers itself as a container user.
+    // Idempotent: safe to call on every execution.
+    const stateDir = getStateDir(_ctx.sessionManager.getSessionDir());
+    deps.acquireSessionRef(stateDir, _ctx.sessionManager.getSessionId());
+
+    // Fast-path: container looks healthy.
+    let needsConnect = container === undefined;
+    if (!needsConnect && container !== undefined) {
+      try {
+        const info = await container.inspect();
+        if (!info.State.Running) {
+          needsConnect = true;
+        }
+      } catch (err) {
+        if (isDockerNotFound(err) || err instanceof DockerDaemonUnreachableError) {
+          needsConnect = true;
+        } else {
+          throw err;
+        }
       }
+    }
+
+    if (needsConnect) {
+      const release = await deps.lifecycleMutex.acquire();
+      try {
+        // Double-check inside the mutex.
+        let stillNeedsConnect = deps.state.container === undefined;
+        if (!stillNeedsConnect && deps.state.container !== undefined) {
+          try {
+            const info = await deps.state.container.inspect();
+            if (!info.State.Running) {
+              stillNeedsConnect = true;
+            }
+          } catch (err) {
+            if (isDockerNotFound(err) || err instanceof DockerDaemonUnreachableError) {
+              stillNeedsConnect = true;
+            } else {
+              throw err;
+            }
+          }
+        }
+
+        if (stillNeedsConnect) {
+          if (deps.state.pull.error) {
+            return {
+              content: [
+                {
+                  type: "text" as const,
+                  text: `Sandbox unavailable: ${deps.state.pull.error}`,
+                },
+              ],
+              details: { error: deps.state.pull.error },
+              isError: true,
+            };
+          }
+
+          const containerName = computeContainerName(workspaceAbsolutePath);
+
+          const result = await startSandboxContainer(
+            deps.state,
+            deps.startDeps,
+            deps.state.config,
+            workspaceAbsolutePath,
+            containerName,
+            stateDir,
+          );
+
+          if (result.kind === "pulling") {
+            return {
+              content: [
+                {
+                  type: "text" as const,
+                  text: `Pulling sandbox image ${deps.state.config.image}...`,
+                },
+              ],
+              details: { error: "Image pull in progress" },
+              isError: true,
+            };
+          }
+
+          if (result.configStaleness) {
+            _ctx.ui.notify("Sandbox config has changed. Run /sandbox-reset to recreate.", "warning");
+          }
+        }
+      } finally {
+        release();
+      }
+      container = deps.state.container;
+    }
+
+    if (container === undefined) {
       return {
         content: [{ type: "text" as const, text: "Sandbox container not running" }],
         details: { error: "Sandbox container not running" },
         isError: true,
       };
-    }
-
-    try {
-      const info = await container.inspect();
-      if (!info.State.Running) {
-        return {
-          content: [{ type: "text" as const, text: "Sandbox container not running" }],
-          details: { error: "Sandbox container not running" },
-          isError: true,
-        };
-      }
-    } catch (err) {
-      if (isDockerNotFound(err)) {
-        return {
-          content: [{ type: "text" as const, text: "Sandbox container not running" }],
-          details: { error: "Sandbox container not running" },
-          isError: true,
-        };
-      }
-      if (err instanceof DockerDaemonUnreachableError) {
-        return {
-          content: [{ type: "text" as const, text: "Docker daemon unreachable" }],
-          details: { error: "Docker daemon unreachable" },
-          isError: true,
-        };
-      }
-      throw err;
     }
 
     try {

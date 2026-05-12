@@ -14,7 +14,7 @@ import {
   getContainerStatus,
 } from "./docker.js";
 import { bashSchema, createBashToolHandler } from "./bash.js";
-import { startSandboxContainer } from "./start-container.js";
+
 import { createSandboxState, type SandboxState, Mutex } from "./state.js";
 import {
   computeContainerName,
@@ -86,7 +86,7 @@ export function createSandboxExtension(options: SandboxExtensionOptions = {}): (
       }
     });
 
-    pi.on("session_start", async (_event, ctx) => {
+    pi.on("session_start", (_event, ctx) => {
       if (pi.getFlag("no-sandbox")) {
         return;
       }
@@ -102,41 +102,9 @@ export function createSandboxExtension(options: SandboxExtensionOptions = {}): (
       validateConfig(loadedConfig);
 
       const workspacePath = realpathSync(ctx.cwd);
-      const containerName = computeContainerName(workspacePath);
-      const stateDir = getStateDir(ctx.sessionManager.getSessionDir());
 
       state.config = loadedConfig;
       state.workspaceAbsolutePath = workspacePath;
-
-      acquireSessionRef(stateDir, ctx.sessionManager.getSessionId());
-
-      const release = await lifecycleMutex.acquire();
-      try {
-        const result = await startSandboxContainer(
-          state,
-          { docker, doesImageExistFn, ensureContainerFn, pullImageFn },
-          loadedConfig,
-          workspacePath,
-          containerName,
-          stateDir,
-        );
-        if (result.kind === "ready" && result.configStaleness) {
-          ctx.ui.notify("Sandbox config has changed. Run /sandbox-reset to recreate.", "warning");
-        }
-        if (result.kind === "pulling") {
-          result.done
-            .then((outcome) => {
-              if (outcome.kind === "error") {
-                ctx.ui.notify(`Sandbox unavailable: ${outcome.message}`, "error");
-              }
-            })
-            .catch(() => {
-              /* ignore unexpected rejection */
-            });
-        }
-      } finally {
-        release();
-      }
     });
 
     pi.on("tool_call", (event, _ctx) => {
@@ -308,37 +276,14 @@ export function createSandboxExtension(options: SandboxExtensionOptions = {}): (
         const stale = countStaleRefs(stateDir);
 
         const release = await lifecycleMutex.acquire();
-        let result: import("./start-container.js").StartSandboxResult | undefined;
         try {
           await stopAndRemoveContainerFn(docker, containerName);
           state.container = undefined;
+          state.pull.isPulling = false;
+          state.pull.error = undefined;
           resetState(stateDir);
-
-          if (state.config !== undefined) {
-            acquireSessionRef(stateDir, ctx.sessionManager.getSessionId());
-            result = await startSandboxContainer(
-              state,
-              { docker, doesImageExistFn, ensureContainerFn, pullImageFn },
-              state.config,
-              workspacePath,
-              containerName,
-              stateDir,
-            );
-          }
         } finally {
           release();
-        }
-
-        if (result?.kind === "pulling") {
-          result.done
-            .then((outcome) => {
-              if (outcome.kind === "error") {
-                ctx.ui.notify(`Sandbox reset complete, but failed to recreate container: ${outcome.message}`, "warning");
-              }
-            })
-            .catch(() => {
-              /* ignore unexpected rejection */
-            });
         }
 
         ctx.ui.notify(`Reset sandbox container. Removed ${String(stale)} stale session reference(s).`, "info");
@@ -355,6 +300,10 @@ export function createSandboxExtension(options: SandboxExtensionOptions = {}): (
         localBash,
         state,
         execInContainerFn,
+        docker,
+        lifecycleMutex,
+        startDeps: { docker, doesImageExistFn, ensureContainerFn, pullImageFn },
+        acquireSessionRef,
       }),
     });
   };

@@ -274,17 +274,22 @@ describe("createSandboxExtension", () => {
     if (firstContent === undefined) {
       throw new Error("Missing content item");
     }
-    assert.ok(firstContent.text.includes("not running"));
+    assert.ok(firstContent.text.includes("not initialized"));
   });
 
-  it("returns container not running when container was removed externally", async () => {
+  it("reconnects lazily when container was removed externally", async () => {
     const config: SandboxConfig = { image: "alpine", env: {}, filesystem: { rw: [], ro: [] } };
     const pi = createMockPi();
+    let inspectCalls = 0;
     const mockContainer = {
       inspect: () => {
-        const err = new Error("(HTTP code 404) no such container") as Error & { statusCode: number };
-        err.statusCode = 404;
-        return Promise.reject(err);
+        inspectCalls++;
+        if (inspectCalls === 1) {
+          const err = new Error("(HTTP code 404) no such container") as Error & { statusCode: number };
+          err.statusCode = 404;
+          return Promise.reject(err);
+        }
+        return Promise.resolve({ State: { Running: true } });
       },
     } as unknown as Container;
 
@@ -292,6 +297,7 @@ describe("createSandboxExtension", () => {
       loadConfigFn: () => ({ config, warnings: [] }),
       doesImageExistFn: () => Promise.resolve(true),
       ensureContainerFn: () => Promise.resolve({ container: mockContainer, created: true }),
+      execInContainerFn: () => Promise.resolve({ stdout: "reconnected", stderr: "", exitCode: 0, timedOut: false, aborted: false }),
     });
     ext(pi);
 
@@ -306,12 +312,12 @@ describe("createSandboxExtension", () => {
       undefined,
       ctx,
     )) as { isError: boolean; content: { text: string }[] };
-    assert.strictEqual(result.isError, true);
+    assert.strictEqual(result.isError, false);
     const firstContent = result.content[0];
     if (firstContent === undefined) {
       throw new Error("Missing content item");
     }
-    assert.ok(firstContent.text.includes("Sandbox container not running"));
+    assert.ok(firstContent.text.includes("reconnected"));
   });
 
   it("executes bash command via container when ready", async () => {
@@ -588,22 +594,39 @@ describe("createSandboxExtension", () => {
     const ctx = createMockCtx(tmpDir);
     await getHandler(pi, "session_start")({}, ctx);
 
-    await new Promise((resolve) => setTimeout(resolve, 10));
-
     const bashTool = getFirstTool(pi);
-    const result = (await bashTool.execute(
+    // First bash call triggers the async pull and returns "pulling" immediately.
+    const firstResult = (await bashTool.execute(
       "call-1",
       { command: "echo hi" },
       undefined,
       undefined,
       ctx,
     )) as { isError: boolean; content: { text: string }[] };
-    assert.strictEqual(result.isError, true);
-    const firstContent = result.content[0];
+    assert.strictEqual(firstResult.isError, true);
+    const firstContent = firstResult.content[0];
     if (firstContent === undefined) {
       throw new Error("Missing content item");
     }
-    assert.ok(firstContent.text.includes("network timeout"));
+    assert.ok(firstContent.text.includes("Pulling sandbox image"));
+
+    // Wait for the background pull to fail.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    // Second bash call surfaces the cached pull error.
+    const secondResult = (await bashTool.execute(
+      "call-2",
+      { command: "echo hi" },
+      undefined,
+      undefined,
+      ctx,
+    )) as { isError: boolean; content: { text: string }[] };
+    assert.strictEqual(secondResult.isError, true);
+    const secondContent = secondResult.content[0];
+    if (secondContent === undefined) {
+      throw new Error("Missing content item");
+    }
+    assert.ok(secondContent.text.includes("network timeout"));
   });
 
   it("blocks symlink loop with mapped reason", async () => {
@@ -788,7 +811,7 @@ describe("createSandboxExtension", () => {
     assert.strictEqual(notifications[0]?.type, "warning");
   });
 
-  it("writes session ref file on session_start", async () => {
+  it("writes session ref file on first bash call", async () => {
     const config: SandboxConfig = { image: "alpine", env: {}, filesystem: { rw: [], ro: [] } };
     const pi = createMockPi();
     const mockContainer = {
@@ -799,11 +822,15 @@ describe("createSandboxExtension", () => {
       loadConfigFn: () => ({ config, warnings: [] }),
       doesImageExistFn: () => Promise.resolve(true),
       ensureContainerFn: () => Promise.resolve({ container: mockContainer, created: true }),
+      execInContainerFn: () => Promise.resolve({ stdout: "", stderr: "", exitCode: 0, timedOut: false, aborted: false }),
     });
     ext(pi);
 
     const ctx = createMockCtx(tmpDir);
     await getHandler(pi, "session_start")({}, ctx);
+
+    const bashTool = getFirstTool(pi);
+    await bashTool.execute("call-1", { command: "echo hi" }, undefined, undefined, ctx);
 
     const refFile = join(tmpDir, ".sandbox", "sessions", "test-session-id");
     assert.strictEqual(existsSync(refFile), true);
@@ -822,6 +849,7 @@ describe("createSandboxExtension", () => {
       loadConfigFn: () => ({ config, warnings: [] }),
       doesImageExistFn: () => Promise.resolve(true),
       ensureContainerFn: () => Promise.resolve({ container: mockContainer, created: true }),
+      execInContainerFn: () => Promise.resolve({ stdout: "", stderr: "", exitCode: 0, timedOut: false, aborted: false }),
       stopAndRemoveContainerFn: (_docker, name): Promise<void> => {
         stoppedContainerName = name;
         return Promise.resolve();
@@ -831,6 +859,10 @@ describe("createSandboxExtension", () => {
 
     const ctx = createMockCtx(tmpDir);
     await getHandler(pi, "session_start")({}, ctx);
+
+    const bashTool = getFirstTool(pi);
+    await bashTool.execute("call-1", { command: "echo hi" }, undefined, undefined, ctx);
+
     await getHandler(pi, "session_shutdown")({}, ctx);
 
     assert.strictEqual(stoppedContainerName !== undefined, true);
@@ -850,12 +882,17 @@ describe("createSandboxExtension", () => {
       loadConfigFn: () => ({ config, warnings: [] }),
       doesImageExistFn: () => Promise.resolve(true),
       ensureContainerFn: () => Promise.resolve({ container: mockContainer, created: true }),
+      execInContainerFn: () => Promise.resolve({ stdout: "", stderr: "", exitCode: 0, timedOut: false, aborted: false }),
       stopAndRemoveContainerFn: (): Promise<void> => Promise.reject(new Error("docker unreachable")),
     });
     ext(pi);
 
     const ctx = createMockCtx(tmpDir);
     await getHandler(pi, "session_start")({}, ctx);
+
+    // Trigger lazy connect so config hash is written.
+    const bashTool = getFirstTool(pi);
+    await bashTool.execute("call-1", { command: "echo hi" }, undefined, undefined, ctx);
 
     await assert.rejects(
       () => getHandler(pi, "session_shutdown")({}, ctx),
@@ -878,6 +915,7 @@ describe("createSandboxExtension", () => {
       loadConfigFn: () => ({ config, warnings: [] }),
       doesImageExistFn: () => Promise.resolve(true),
       ensureContainerFn: () => Promise.resolve({ container: mockContainer, created: true }),
+      execInContainerFn: () => Promise.resolve({ stdout: "", stderr: "", exitCode: 0, timedOut: false, aborted: false }),
       stopAndRemoveContainerFn: (): Promise<void> => {
         stopped = true;
         return Promise.resolve();
@@ -890,13 +928,18 @@ describe("createSandboxExtension", () => {
 
     await getHandler(pi, "session_start")({}, ctxA);
     await getHandler(pi, "session_start")({}, ctxB);
+
+    const bashTool = getFirstTool(pi);
+    await bashTool.execute("call-a", { command: "echo hi" }, undefined, undefined, ctxA);
+    await bashTool.execute("call-b", { command: "echo hi" }, undefined, undefined, ctxB);
+
     await getHandler(pi, "session_shutdown")({}, ctxA);
 
     assert.strictEqual(stopped, false);
     assert.strictEqual(existsSync(join(tmpDir, ".sandbox", "sessions", "session-b")), true);
   });
 
-  it("writes config hash on first session_start", async () => {
+  it("writes config hash on first bash call", async () => {
     const config: SandboxConfig = { image: "alpine", env: {}, filesystem: { rw: [], ro: [] } };
     const pi = createMockPi();
     const mockContainer = {
@@ -907,11 +950,15 @@ describe("createSandboxExtension", () => {
       loadConfigFn: () => ({ config, warnings: [] }),
       doesImageExistFn: () => Promise.resolve(true),
       ensureContainerFn: () => Promise.resolve({ container: mockContainer, created: true }),
+      execInContainerFn: () => Promise.resolve({ stdout: "", stderr: "", exitCode: 0, timedOut: false, aborted: false }),
     });
     ext(pi);
 
     const ctx = createMockCtx(tmpDir);
     await getHandler(pi, "session_start")({}, ctx);
+
+    const bashTool = getFirstTool(pi);
+    await bashTool.execute("call-1", { command: "echo hi" }, undefined, undefined, ctx);
 
     const hashFile = join(tmpDir, ".sandbox", "config-hash");
     assert.strictEqual(existsSync(hashFile), true);
@@ -922,36 +969,46 @@ describe("createSandboxExtension", () => {
   it("emits config staleness warning when reusing container with different config", async () => {
     const config1: SandboxConfig = { image: "alpine", env: {}, filesystem: { rw: [], ro: [] } };
     const config2: SandboxConfig = { image: "ubuntu", env: {}, filesystem: { rw: [], ro: [] } };
-    const pi = createMockPi();
+    const notifications: { message: string; type: string }[] = [];
+
     const mockContainer = {
       inspect: () => Promise.resolve({ State: { Running: true } }),
     } as unknown as Container;
 
-    const notifications: { message: string; type: string }[] = [];
+    // Session A uses a separate extension instance to simulate real isolation.
+    const piA = createMockPi();
+    const extA = createSandboxExtension({
+      loadConfigFn: () => ({ config: config1, warnings: [] }),
+      doesImageExistFn: () => Promise.resolve(true),
+      ensureContainerFn: () => Promise.resolve({ container: mockContainer, created: true }),
+      execInContainerFn: () => Promise.resolve({ stdout: "", stderr: "", exitCode: 0, timedOut: false, aborted: false }),
+    });
+    extA(piA);
 
-    const ext = createSandboxExtension({
-      loadConfigFn: ((): (() => { config: SandboxConfig; warnings: string[] }) => {
-        let call = 0;
-        return () => {
-          call++;
-          return { config: call === 1 ? config1 : config2, warnings: [] };
-        };
-      })(),
+    const ctxA = createMockCtxWithSession(tmpDir, "session-a", notifications);
+    await getHandler(piA, "session_start")({}, ctxA);
+    const bashToolA = getFirstTool(piA);
+    await bashToolA.execute("call-a", { command: "echo hi" }, undefined, undefined, ctxA);
+
+    // Session B uses another extension instance with a different config.
+    const piB = createMockPi();
+    const extB = createSandboxExtension({
+      loadConfigFn: () => ({ config: config2, warnings: [] }),
       doesImageExistFn: () => Promise.resolve(true),
       ensureContainerFn: () => Promise.resolve({ container: mockContainer, created: false }),
+      execInContainerFn: () => Promise.resolve({ stdout: "", stderr: "", exitCode: 0, timedOut: false, aborted: false }),
     });
-    ext(pi);
+    extB(piB);
 
-    const ctx1 = createMockCtxWithSession(tmpDir, "session-a", notifications);
-    await getHandler(pi, "session_start")({}, ctx1);
-
-    const ctx2 = createMockCtxWithSession(tmpDir, "session-b", notifications);
-    await getHandler(pi, "session_start")({}, ctx2);
+    const ctxB = createMockCtxWithSession(tmpDir, "session-b", notifications);
+    await getHandler(piB, "session_start")({}, ctxB);
+    const bashToolB = getFirstTool(piB);
+    await bashToolB.execute("call-b", { command: "echo hi" }, undefined, undefined, ctxB);
 
     assert.ok(notifications.some((n) => n.message.includes("Sandbox config has changed")));
   });
 
-  it("sandbox-reset stops container, clears state, and recreates for current session", async () => {
+  it("sandbox-reset stops container, clears state, and lazily recreates on next bash call", async () => {
     const config: SandboxConfig = { image: "alpine", env: {}, filesystem: { rw: [], ro: [] } };
     const pi = createMockPi();
     const mockContainer = {
@@ -973,11 +1030,16 @@ describe("createSandboxExtension", () => {
         stoppedContainerName = name;
         return Promise.resolve();
       },
+      execInContainerFn: () => Promise.resolve({ stdout: "", stderr: "", exitCode: 0, timedOut: false, aborted: false }),
     });
     ext(pi);
 
     const ctx = createMockCtx(tmpDir, notifications);
     await getHandler(pi, "session_start")({}, ctx);
+
+    // Lazy connect via bash so there is a container to tear down.
+    const bashTool = getFirstTool(pi);
+    await bashTool.execute("call-1", { command: "echo hi" }, undefined, undefined, ctx);
     assert.strictEqual(ensureCalls, 1);
 
     // Simulate a stale ref.
@@ -987,13 +1049,19 @@ describe("createSandboxExtension", () => {
     await resetCmd.handler("", ctx);
 
     assert.strictEqual(stoppedContainerName !== undefined, true);
-    // Old stale ref is gone, current session ref is re-acquired
+    // Old stale ref is gone; current session ref is not re-acquired until next bash
     assert.strictEqual(existsSync(join(tmpDir, ".sandbox", "sessions", "stale-session")), false);
-    assert.strictEqual(existsSync(join(tmpDir, ".sandbox", "sessions", "test-session-id")), true);
-    assert.strictEqual(existsSync(join(tmpDir, ".sandbox", "config-hash")), true);
+    assert.strictEqual(existsSync(join(tmpDir, ".sandbox", "sessions", "test-session-id")), false);
+    // Config hash was cleared by reset; no eager recreation
+    assert.strictEqual(existsSync(join(tmpDir, ".sandbox", "config-hash")), false);
     assert.ok(notifications.some((n) => n.message.includes("Reset sandbox container")));
-    // Container was recreated during reset
+    // Reset itself does not recreate; ensureCalls stays at 1
+    assert.strictEqual(ensureCalls, 1);
+
+    // Next bash call lazily recreates.
+    await bashTool.execute("call-2", { command: "echo hi" }, undefined, undefined, ctx);
     assert.strictEqual(ensureCalls, 2);
+    assert.strictEqual(existsSync(join(tmpDir, ".sandbox", "config-hash")), true);
   });
 
   it("bash works after sandbox-reset", async () => {
@@ -1078,11 +1146,16 @@ describe("createSandboxExtension", () => {
       doesImageExistFn: () => Promise.resolve(true),
       ensureContainerFn: () => Promise.resolve({ container: mockContainer, created: true }),
       getContainerStatusFn: () => Promise.resolve("running"),
+      execInContainerFn: () => Promise.resolve({ stdout: "", stderr: "", exitCode: 0, timedOut: false, aborted: false }),
     });
     ext(pi);
 
     const ctx = createMockCtx(tmpDir, notifications);
     await getHandler(pi, "session_start")({}, ctx);
+
+    // Trigger lazy connect to acquire the session ref.
+    const bashTool = getFirstTool(pi);
+    await bashTool.execute("call-1", { command: "echo hi" }, undefined, undefined, ctx);
 
     const statusCmd = getCommandByName(pi, "sandbox-status");
     await statusCmd.handler("", ctx);
@@ -1118,11 +1191,16 @@ describe("createSandboxExtension", () => {
       doesImageExistFn: () => Promise.resolve(true),
       ensureContainerFn: () => Promise.resolve({ container: mockContainer, created: false }),
       getContainerStatusFn: () => Promise.resolve("running"),
+      execInContainerFn: () => Promise.resolve({ stdout: "", stderr: "", exitCode: 0, timedOut: false, aborted: false }),
     });
     ext(pi);
 
     const ctx1 = createMockCtxWithSession(tmpDir, "session-a", notifications);
     await getHandler(pi, "session_start")({}, ctx1);
+
+    // Session A triggers lazy connect, writing the config hash for config1.
+    const bashTool = getFirstTool(pi);
+    await bashTool.execute("call-a", { command: "echo hi" }, undefined, undefined, ctx1);
 
     const ctx2 = createMockCtxWithSession(tmpDir, "session-b", notifications);
     await getHandler(pi, "session_start")({}, ctx2);
