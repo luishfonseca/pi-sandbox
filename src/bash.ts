@@ -26,10 +26,113 @@ export interface BashToolDependencies {
   localBash: ReturnType<typeof createBashTool>;
   state: SandboxState;
   execInContainerFn: typeof execInContainer;
-  docker: Dockerode;
+  ensureConnected: (ctx: ExtensionContext) => Promise<{ container: Dockerode.Container } | { error: string }>;
+}
+
+export interface EnsureConnectedOptions {
+  state: SandboxState;
   lifecycleMutex: Mutex;
   startDeps: StartSandboxDependencies;
   acquireSessionRef: (stateDir: string, sessionId: string) => void;
+}
+
+export function createEnsureConnected(options: EnsureConnectedOptions): (
+  ctx: ExtensionContext,
+) => Promise<{ container: Dockerode.Container } | { error: string }> {
+  return async function ensureConnected(ctx) {
+    const workspaceAbsolutePath = options.state.workspaceAbsolutePath;
+    if (workspaceAbsolutePath === undefined || options.state.config === undefined) {
+      return { error: "Sandbox not initialized" };
+    }
+
+    const stateDir = getStateDir(ctx.sessionManager.getSessionDir());
+    options.acquireSessionRef(stateDir, ctx.sessionManager.getSessionId());
+
+    const container = options.state.container;
+
+    // Fast-path: container looks healthy.
+    let needsConnect = container === undefined;
+    if (!needsConnect && container !== undefined) {
+      try {
+        const info = await container.inspect();
+        if (!info.State.Running) {
+          needsConnect = true;
+        }
+      } catch (err) {
+        if (isDockerNotFound(err) || err instanceof DockerDaemonUnreachableError) {
+          needsConnect = true;
+        } else {
+          throw err;
+        }
+      }
+    }
+
+    if (!needsConnect) {
+      const readyContainer = container;
+      if (readyContainer === undefined) {
+        return { error: "Sandbox container not running" };
+      }
+      return { container: readyContainer };
+    }
+
+    const release = await options.lifecycleMutex.acquire();
+    try {
+      // Double-check inside the mutex.
+      let stillNeedsConnect = options.state.container === undefined;
+      if (!stillNeedsConnect && options.state.container !== undefined) {
+        try {
+          const info = await options.state.container.inspect();
+          if (!info.State.Running) {
+            stillNeedsConnect = true;
+          }
+        } catch (err) {
+          if (isDockerNotFound(err) || err instanceof DockerDaemonUnreachableError) {
+            stillNeedsConnect = true;
+          } else {
+            throw err;
+          }
+        }
+      }
+
+      if (!stillNeedsConnect) {
+        const existingContainer = options.state.container;
+        if (existingContainer === undefined) {
+          return { error: "Sandbox container not running" };
+        }
+        return { container: existingContainer };
+      }
+
+      if (options.state.pull.error) {
+        return { error: `Sandbox unavailable: ${options.state.pull.error}` };
+      }
+
+      const containerName = computeContainerName(workspaceAbsolutePath);
+      const result = await startSandboxContainer(
+        options.state,
+        options.startDeps,
+        options.state.config,
+        workspaceAbsolutePath,
+        containerName,
+        stateDir,
+      );
+
+      if (result.kind === "pulling") {
+        return { error: `Pulling sandbox image ${options.state.config.image}...` };
+      }
+
+      if (result.configStaleness) {
+        ctx.ui.notify("Sandbox config has changed. Run /sandbox-reset to recreate.", "warning");
+      }
+
+      const finalContainer = options.state.container;
+      if (finalContainer === undefined) {
+        return { error: "Sandbox container not running" };
+      }
+      return { container: finalContainer };
+    } finally {
+      release();
+    }
+  };
 }
 
 export function createBashToolHandler(deps: BashToolDependencies): (
@@ -63,108 +166,19 @@ export function createBashToolHandler(deps: BashToolDependencies): (
       };
     }
 
-    let container = deps.state.container;
-    const workspaceAbsolutePath = deps.state.workspaceAbsolutePath;
-
-    if (workspaceAbsolutePath === undefined || deps.state.config === undefined) {
+    const connected = await deps.ensureConnected(_ctx);
+    if ("error" in connected) {
       return {
-        content: [{ type: "text" as const, text: "Sandbox not initialized" }],
-        details: { error: "Sandbox not initialized" },
+        content: [{ type: "text" as const, text: connected.error }],
+        details: { error: connected.error },
         isError: true,
       };
     }
 
-    // Every bash call from an initialized session registers itself as a container user.
-    // Idempotent: safe to call on every execution.
-    const stateDir = getStateDir(_ctx.sessionManager.getSessionDir());
-    deps.acquireSessionRef(stateDir, _ctx.sessionManager.getSessionId());
+    const container = connected.container;
+    const workspaceAbsolutePath = deps.state.workspaceAbsolutePath;
 
-    // Fast-path: container looks healthy.
-    let needsConnect = container === undefined;
-    if (!needsConnect && container !== undefined) {
-      try {
-        const info = await container.inspect();
-        if (!info.State.Running) {
-          needsConnect = true;
-        }
-      } catch (err) {
-        if (isDockerNotFound(err) || err instanceof DockerDaemonUnreachableError) {
-          needsConnect = true;
-        } else {
-          throw err;
-        }
-      }
-    }
-
-    if (needsConnect) {
-      const release = await deps.lifecycleMutex.acquire();
-      try {
-        // Double-check inside the mutex.
-        let stillNeedsConnect = deps.state.container === undefined;
-        if (!stillNeedsConnect && deps.state.container !== undefined) {
-          try {
-            const info = await deps.state.container.inspect();
-            if (!info.State.Running) {
-              stillNeedsConnect = true;
-            }
-          } catch (err) {
-            if (isDockerNotFound(err) || err instanceof DockerDaemonUnreachableError) {
-              stillNeedsConnect = true;
-            } else {
-              throw err;
-            }
-          }
-        }
-
-        if (stillNeedsConnect) {
-          if (deps.state.pull.error) {
-            return {
-              content: [
-                {
-                  type: "text" as const,
-                  text: `Sandbox unavailable: ${deps.state.pull.error}`,
-                },
-              ],
-              details: { error: deps.state.pull.error },
-              isError: true,
-            };
-          }
-
-          const containerName = computeContainerName(workspaceAbsolutePath);
-
-          const result = await startSandboxContainer(
-            deps.state,
-            deps.startDeps,
-            deps.state.config,
-            workspaceAbsolutePath,
-            containerName,
-            stateDir,
-          );
-
-          if (result.kind === "pulling") {
-            return {
-              content: [
-                {
-                  type: "text" as const,
-                  text: `Pulling sandbox image ${deps.state.config.image}...`,
-                },
-              ],
-              details: { error: "Image pull in progress" },
-              isError: true,
-            };
-          }
-
-          if (result.configStaleness) {
-            _ctx.ui.notify("Sandbox config has changed. Run /sandbox-reset to recreate.", "warning");
-          }
-        }
-      } finally {
-        release();
-      }
-      container = deps.state.container;
-    }
-
-    if (container === undefined) {
+    if (workspaceAbsolutePath === undefined) {
       return {
         content: [{ type: "text" as const, text: "Sandbox container not running" }],
         details: { error: "Sandbox container not running" },

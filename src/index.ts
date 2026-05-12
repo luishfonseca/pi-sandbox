@@ -13,7 +13,7 @@ import {
   stopAndRemoveContainer,
   getContainerStatus,
 } from "./docker.js";
-import { bashSchema, createBashToolHandler } from "./bash.js";
+import { bashSchema, createBashToolHandler, createEnsureConnected } from "./bash.js";
 
 import { createSandboxState, type SandboxState, Mutex } from "./state.js";
 import {
@@ -290,6 +290,13 @@ export function createSandboxExtension(options: SandboxExtensionOptions = {}): (
       },
     });
 
+    const ensureConnected = createEnsureConnected({
+      state,
+      lifecycleMutex,
+      startDeps: { docker, doesImageExistFn, ensureContainerFn, pullImageFn },
+      acquireSessionRef,
+    });
+
     pi.registerTool({
       name: "bash",
       label: "bash (sandboxed)",
@@ -300,10 +307,7 @@ export function createSandboxExtension(options: SandboxExtensionOptions = {}): (
         localBash,
         state,
         execInContainerFn,
-        docker,
-        lifecycleMutex,
-        startDeps: { docker, doesImageExistFn, ensureContainerFn, pullImageFn },
-        acquireSessionRef,
+        ensureConnected,
       }),
     });
   };
