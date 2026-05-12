@@ -372,7 +372,7 @@ The following are explicitly deferred. v1 MUST compile and run without them.
 4. **Mask / downgrade mounts.** VFS-level enforcement of read-only restrictions inside read-write trees.
 5. **Custom capabilities.** `capabilities: string[]` in config.
 6. **Config reload.** Recreate container when `sandbox.json` changes and user calls /reload.
-7. **`/sandbox-reset` command.** A registered command that force-stops and removes the workspace sandbox container, clearing all refcount state. This recreates the container with the latest config on the next session start. It is also used to recover from leaked reference files after a crash. Specified in [DESIGN_EXTENSION.workspace-scoped.md](DESIGN_EXTENSION.workspace-scoped.md) §2.7.
+7. **`/sandbox-reset` command.** A registered command that force-stops and removes the workspace sandbox container, clearing all refcount state. This recreates the container with the latest config on the next session start. It is also used to recover from stale reference files after a crash. Specified in [DESIGN_EXTENSION.workspace-scoped.md](DESIGN_EXTENSION.workspace-scoped.md) §2.7.
 
 ---
 

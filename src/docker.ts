@@ -98,15 +98,11 @@ export function buildEnvVars(
 
 export function createMissingDirs(paths: string[]): void {
   for (const p of paths) {
-    try {
-      mkdirSync(p, { recursive: true });
-    } catch {
-      // Ignore; Docker will surface the real error if the path is unusable.
-    }
+    mkdirSync(p, { recursive: true });
   }
 }
 
-function isDockerNotFound(err: unknown): boolean {
+export function isDockerNotFound(err: unknown): boolean {
   return (
     err instanceof Error &&
     "statusCode" in err &&
@@ -311,13 +307,12 @@ export async function execInContainer(
   const modem = (exec as unknown as { modem: DockerModem }).modem;
   modem.demuxStream(stream, stdout, stderr);
 
-  let timedOut = false;
-  let aborted = false;
+  const state = { timedOut: false, aborted: false };
   let timer: ReturnType<typeof setTimeout> | undefined;
 
   if (timeout !== undefined && timeout > 0) {
     timer = setTimeout(() => {
-      timedOut = true;
+      state.timedOut = true;
       void killExec(exec, "SIGKILL");
       stream.destroy();
     }, timeout * 1000);
@@ -326,7 +321,7 @@ export async function execInContainer(
   let abortHandler: (() => void) | undefined;
   if (signal) {
     abortHandler = (): void => {
-      aborted = true;
+      state.aborted = true;
       void killExec(exec, "SIGKILL");
       stream.destroy();
     };
@@ -344,7 +339,7 @@ export async function execInContainer(
     };
     const onError = (err: Error): void => {
       cleanup();
-      if (timedOut || aborted) {
+      if (state.timedOut || state.aborted) {
         resolve();
       } else {
         reject(err);
@@ -368,12 +363,16 @@ export async function execInContainer(
   }
 
   let exitCode: number | null = null;
-  if (!timedOut && !aborted) {
+  if (!state.timedOut && !state.aborted) {
     try {
       const info = await exec.inspect();
       exitCode = info.ExitCode ?? null;
-    } catch {
-      exitCode = null;
+    } catch (err) {
+      if (isDockerNotFound(err)) {
+        exitCode = null;
+      } else {
+        throw err;
+      }
     }
   }
 
@@ -384,8 +383,8 @@ export async function execInContainer(
     stdout: resultStdout,
     stderr: resultStderr,
     exitCode,
-    timedOut,
-    aborted,
+    timedOut: state.timedOut,
+    aborted: state.aborted,
   };
 }
 

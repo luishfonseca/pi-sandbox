@@ -277,6 +277,43 @@ describe("createSandboxExtension", () => {
     assert.ok(firstContent.text.includes("not running"));
   });
 
+  it("returns container not running when container was removed externally", async () => {
+    const config: SandboxConfig = { image: "alpine", env: {}, filesystem: { rw: [], ro: [] } };
+    const pi = createMockPi();
+    const mockContainer = {
+      inspect: () => {
+        const err = new Error("(HTTP code 404) no such container") as Error & { statusCode: number };
+        err.statusCode = 404;
+        return Promise.reject(err);
+      },
+    } as unknown as Container;
+
+    const ext = createSandboxExtension({
+      loadConfigFn: () => ({ config, warnings: [] }),
+      doesImageExistFn: () => Promise.resolve(true),
+      ensureContainerFn: () => Promise.resolve({ container: mockContainer, created: true }),
+    });
+    ext(pi);
+
+    const ctx = createMockCtx(tmpDir);
+    await getHandler(pi, "session_start")({}, ctx);
+
+    const bashTool = getFirstTool(pi);
+    const result = (await bashTool.execute(
+      "call-1",
+      { command: "echo hello" },
+      undefined,
+      undefined,
+      ctx,
+    )) as { isError: boolean; content: { text: string }[] };
+    assert.strictEqual(result.isError, true);
+    const firstContent = result.content[0];
+    if (firstContent === undefined) {
+      throw new Error("Missing content item");
+    }
+    assert.ok(firstContent.text.includes("Sandbox container not running"));
+  });
+
   it("executes bash command via container when ready", async () => {
     const config: SandboxConfig = { image: "alpine", env: {}, filesystem: { rw: [], ro: [] } };
     const pi = createMockPi();
@@ -914,7 +951,7 @@ describe("createSandboxExtension", () => {
     assert.ok(notifications.some((n) => n.message.includes("Sandbox config has changed")));
   });
 
-  it("sandbox-reset stops container and clears state", async () => {
+  it("sandbox-reset stops container, clears state, and recreates for current session", async () => {
     const config: SandboxConfig = { image: "alpine", env: {}, filesystem: { rw: [], ro: [] } };
     const pi = createMockPi();
     const mockContainer = {
@@ -922,12 +959,16 @@ describe("createSandboxExtension", () => {
     } as unknown as Container;
 
     let stoppedContainerName: string | undefined;
+    let ensureCalls = 0;
     const notifications: { message: string; type: string }[] = [];
 
     const ext = createSandboxExtension({
       loadConfigFn: () => ({ config, warnings: [] }),
       doesImageExistFn: () => Promise.resolve(true),
-      ensureContainerFn: () => Promise.resolve({ container: mockContainer, created: true }),
+      ensureContainerFn: () => {
+        ensureCalls++;
+        return Promise.resolve({ container: mockContainer, created: true });
+      },
       stopAndRemoveContainerFn: (_docker, name): Promise<void> => {
         stoppedContainerName = name;
         return Promise.resolve();
@@ -937,17 +978,61 @@ describe("createSandboxExtension", () => {
 
     const ctx = createMockCtx(tmpDir, notifications);
     await getHandler(pi, "session_start")({}, ctx);
+    assert.strictEqual(ensureCalls, 1);
 
-    // Simulate a leaked ref.
-    writeFileSync(join(tmpDir, ".sandbox", "sessions", "leaked-session"), "");
+    // Simulate a stale ref.
+    writeFileSync(join(tmpDir, ".sandbox", "sessions", "stale-session"), "");
 
     const resetCmd = getCommandByName(pi, "sandbox-reset");
     await resetCmd.handler("", ctx);
 
     assert.strictEqual(stoppedContainerName !== undefined, true);
-    assert.strictEqual(existsSync(join(tmpDir, ".sandbox", "sessions")), false);
-    assert.strictEqual(existsSync(join(tmpDir, ".sandbox")), false);
+    // Old stale ref is gone, current session ref is re-acquired
+    assert.strictEqual(existsSync(join(tmpDir, ".sandbox", "sessions", "stale-session")), false);
+    assert.strictEqual(existsSync(join(tmpDir, ".sandbox", "sessions", "test-session-id")), true);
+    assert.strictEqual(existsSync(join(tmpDir, ".sandbox", "config-hash")), true);
     assert.ok(notifications.some((n) => n.message.includes("Reset sandbox container")));
+    // Container was recreated during reset
+    assert.strictEqual(ensureCalls, 2);
+  });
+
+  it("bash works after sandbox-reset", async () => {
+    const config: SandboxConfig = { image: "alpine", env: {}, filesystem: { rw: [], ro: [] } };
+    const pi = createMockPi();
+    const mockContainer = {
+      inspect: () => Promise.resolve({ State: { Running: true } }),
+    } as unknown as Container;
+
+    const ext = createSandboxExtension({
+      loadConfigFn: () => ({ config, warnings: [] }),
+      doesImageExistFn: () => Promise.resolve(true),
+      ensureContainerFn: () => Promise.resolve({ container: mockContainer, created: true }),
+      stopAndRemoveContainerFn: () => Promise.resolve(),
+      execInContainerFn: () => Promise.resolve({ stdout: "post-reset", stderr: "", exitCode: 0, timedOut: false, aborted: false }),
+    });
+    ext(pi);
+
+    const ctx = createMockCtx(tmpDir);
+    await getHandler(pi, "session_start")({}, ctx);
+
+    const resetCmd = getCommandByName(pi, "sandbox-reset");
+    await resetCmd.handler("", ctx);
+
+    const bashTool = getFirstTool(pi);
+    const result = (await bashTool.execute(
+      "call-1",
+      { command: "echo post-reset" },
+      undefined,
+      undefined,
+      ctx,
+    )) as { isError: boolean; content: { text: string }[]; details: { exitCode: number } };
+    assert.strictEqual(result.isError, false);
+    const firstContent = result.content[0];
+    if (firstContent === undefined) {
+      throw new Error("Missing content item");
+    }
+    assert.strictEqual(firstContent.text, "post-reset");
+    assert.strictEqual(result.details.exitCode, 0);
   });
 
   it("sandbox-reset notifies when no state exists", async () => {

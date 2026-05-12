@@ -7,9 +7,8 @@ import {
   formatSize,
 } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
-import Dockerode from "dockerode";
-import { execInContainer, DockerDaemonUnreachableError } from "./docker.js";
-import type { SandboxConfig } from "./config.js";
+import { execInContainer, DockerDaemonUnreachableError, isDockerNotFound } from "./docker.js";
+import type { SandboxState } from "./state.js";
 
 export const bashSchema = Type.Object({
   command: Type.String({ description: "Bash command to execute" }),
@@ -21,11 +20,7 @@ export const bashSchema = Type.Object({
 export interface BashToolDependencies {
   getNoSandbox: () => boolean;
   localBash: ReturnType<typeof createBashTool>;
-  getIsPulling: () => boolean;
-  getPullError: () => string | undefined;
-  getConfig: () => SandboxConfig | undefined;
-  getContainer: () => Dockerode.Container | undefined;
-  getWorkspaceAbsolutePath: () => string | undefined;
+  state: SandboxState;
   execInContainerFn: typeof execInContainer;
 }
 
@@ -47,12 +42,12 @@ export function createBashToolHandler(deps: BashToolDependencies): (
       return deps.localBash.execute(toolCallId, params, signal, onUpdate);
     }
 
-    if (deps.getIsPulling()) {
+    if (deps.state.pull.isPulling) {
       return {
         content: [
           {
             type: "text" as const,
-            text: `Pulling sandbox image ${deps.getConfig()?.image ?? "unknown"}...`,
+            text: `Pulling sandbox image ${deps.state.config?.image ?? "unknown"}...`,
           },
         ],
         details: { error: "Image pull in progress" },
@@ -60,17 +55,17 @@ export function createBashToolHandler(deps: BashToolDependencies): (
       };
     }
 
-    const container = deps.getContainer();
-    const workspaceAbsolutePath = deps.getWorkspaceAbsolutePath();
+    const container = deps.state.container;
+    const workspaceAbsolutePath = deps.state.workspaceAbsolutePath;
 
     if (container === undefined || workspaceAbsolutePath === undefined) {
-      const pullError = deps.getPullError();
+      const pullError = deps.state.pull.error;
       if (pullError) {
         return {
           content: [
             {
               type: "text" as const,
-              text: `Failed to pull sandbox image: ${pullError}`,
+              text: `Sandbox unavailable: ${pullError}`,
             },
           ],
           details: { error: pullError },
@@ -93,7 +88,25 @@ export function createBashToolHandler(deps: BashToolDependencies): (
           isError: true,
         };
       }
+    } catch (err) {
+      if (isDockerNotFound(err)) {
+        return {
+          content: [{ type: "text" as const, text: "Sandbox container not running" }],
+          details: { error: "Sandbox container not running" },
+          isError: true,
+        };
+      }
+      if (err instanceof DockerDaemonUnreachableError) {
+        return {
+          content: [{ type: "text" as const, text: "Docker daemon unreachable" }],
+          details: { error: "Docker daemon unreachable" },
+          isError: true,
+        };
+      }
+      throw err;
+    }
 
+    try {
       let timeout: number | undefined;
       if (
         typeof params.timeout === "number" &&

@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { mkdirSync, readdirSync, readFileSync, writeFileSync, unlinkSync, rmdirSync } from "node:fs";
+import { isNodeError } from "./acl.js";
 import type { SandboxConfig } from "./config.js";
 
 export function computeContainerName(workspaceAbsolutePath: string): string {
@@ -25,23 +26,31 @@ export function releaseSessionRef(stateDir: string, sessionId: string): boolean 
   const sessionFile = `${stateDir}/sessions/${sessionId}`;
   try {
     unlinkSync(sessionFile);
-  } catch {
-    // Ignore if missing.
+  } catch (err) {
+    if (!isNodeError(err) || err.code !== "ENOENT") {
+      throw err;
+    }
   }
 
   try {
     const files = readdirSync(`${stateDir}/sessions`);
     return files.length === 0;
-  } catch {
-    return true;
+  } catch (err) {
+    if (isNodeError(err) && err.code === "ENOENT") {
+      return true;
+    }
+    throw err;
   }
 }
 
 export function readStoredConfigHash(stateDir: string): string | undefined {
   try {
     return readFileSync(`${stateDir}/config-hash`, "utf-8");
-  } catch {
-    return undefined;
+  } catch (err) {
+    if (isNodeError(err) && err.code === "ENOENT") {
+      return undefined;
+    }
+    throw err;
   }
 }
 
@@ -52,16 +61,21 @@ export function writeConfigHash(stateDir: string, configHash: string): void {
 export function deleteConfigHash(stateDir: string): void {
   try {
     unlinkSync(`${stateDir}/config-hash`);
-  } catch {
-    // Ignore if missing.
+  } catch (err) {
+    if (!isNodeError(err) || err.code !== "ENOENT") {
+      throw err;
+    }
   }
 }
 
-export function countLeakedRefs(stateDir: string): number {
+export function countStaleRefs(stateDir: string): number {
   try {
     return readdirSync(`${stateDir}/sessions`).length;
-  } catch {
-    return 0;
+  } catch (err) {
+    if (isNodeError(err) && err.code === "ENOENT") {
+      return 0;
+    }
+    throw err;
   }
 }
 
@@ -73,13 +87,22 @@ export function resetState(stateDir: string): void {
       unlinkSync(`${sessionsDir}/${file}`);
     }
     rmdirSync(sessionsDir);
-  } catch {
-    // Ignore if missing.
+  } catch (err) {
+    if (!isNodeError(err) || err.code !== "ENOENT") {
+      throw err;
+    }
   }
   deleteConfigHash(stateDir);
   try {
     rmdirSync(stateDir);
-  } catch {
-    // Ignore if not empty or missing.
+  } catch (err) {
+    if (
+      !(
+        isNodeError(err) &&
+        (err.code === "ENOENT" || err.code === "ENOTEMPTY")
+      )
+    ) {
+      throw err;
+    }
   }
 }

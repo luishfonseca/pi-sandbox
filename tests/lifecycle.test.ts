@@ -12,7 +12,7 @@ import {
   readStoredConfigHash,
   writeConfigHash,
   deleteConfigHash,
-  countLeakedRefs,
+  countStaleRefs,
   resetState,
 } from "../src/lifecycle.js";
 import type { SandboxConfig } from "../src/config.js";
@@ -192,7 +192,7 @@ describe("deleteConfigHash", () => {
   });
 });
 
-describe("countLeakedRefs", () => {
+describe("countStaleRefs", () => {
   let tmpDir: string;
 
   beforeEach(() => {
@@ -207,11 +207,11 @@ describe("countLeakedRefs", () => {
     const stateDir = `${tmpDir}/.sandbox`;
     acquireSessionRef(stateDir, "a");
     acquireSessionRef(stateDir, "b");
-    assert.strictEqual(countLeakedRefs(stateDir), 2);
+    assert.strictEqual(countStaleRefs(stateDir), 2);
   });
 
   it("returns 0 when there are no refs", () => {
-    assert.strictEqual(countLeakedRefs(`${tmpDir}/.sandbox`), 0);
+    assert.strictEqual(countStaleRefs(`${tmpDir}/.sandbox`), 0);
   });
 });
 

@@ -117,21 +117,31 @@ The staleness state is reported by `/sandbox-status`.
 ```
 1. Compute containerName from workspaceAbsolutePath (§2.1).
 2. Compute stateDir from ctx.sessionManager.getSessionDir() (§2.2).
-3. Count leaked reference files:
-   leaked = readdirSync(`${stateDir}/sessions/`).length
+3. Count stale reference files:
+   stale = readdirSync(`${stateDir}/sessions/`).length
 4. Stop and remove the container named containerName (force: true).
 5. Delete `${stateDir}/config-hash`.
 6. Delete all files in `${stateDir}/sessions/`.
-7. Notify the user:
-   "Reset sandbox container. Removed {leaked} leaked session reference(s)."
+7. Re-acquire a session reference for the current session.
+8. Recreate and start the sandbox container with the current config.
+9. Write the current config hash to `${stateDir}/config-hash`.
+10. Notify the user:
+    "Reset sandbox container. Removed {stale} stale session reference(s)."
 ```
 
 **Error conditions:**
 - Container does not exist or is already removed → continue, do not fail.
 - `stateDir` does not exist → nothing to reset; notify "No sandbox state found."
 - Docker daemon unreachable → throw / surface error to user.
+- Container recreation fails → notify a warning, but the reset itself does not fail.
 
-**Postcondition:** The workspace has no running sandbox container and no refcount state. The next session start in this workspace will create a fresh container with the current config.
+**Postcondition:**
+- The previous container (if any) has been stopped and removed.
+- All refcount state (`${stateDir}/sessions/*` and `${stateDir}/config-hash`) has been deleted.
+- A fresh container is created and started **inline** during the command handler (not deferred to a future session start).
+- The current session holds an active reference file in the recreated state directory.
+- The current config hash is written to `${stateDir}/config-hash`.
+- If the effective config is unavailable because `session_start` has not yet run in this extension instance, state is cleared but no container is recreated.
 
 ---
 
@@ -188,7 +198,7 @@ Session B starts (same workspace)
 - **Do not** embed `configHash` in the container name. One workspace = one container name.
 - **Do not** implement idle timeout or automatic container expiration. Cleanup is strictly reference-counted.
 - **Do not** stop containers on config mismatch. Warn only.
-- **Do not** garbage-collect leaked containers automatically. Manual `/sandbox-reset` is the escape hatch for v1.
+- **Do not** garbage-collect stale containers automatically. Manual `/sandbox-reset` is the escape hatch for v1.
 - **Do not** share containers across different workspaces, even if the workspace paths are symlink aliases.
 - **Do not** migrate running processes or state from an old container to a new one on config change.
 - **Do not** read or write the refcount state when `--no-sandbox` is active.
@@ -211,6 +221,6 @@ Replace DESIGN.md §6.1 with §2.4 above.
 Replace DESIGN.md §6.2 with §2.5 above.  
 Replace extension point 8 in DESIGN.md §9 with:
 
-> **8. `/sandbox-reset` command.** A registered command that force-stops and removes the workspace sandbox container, clearing all refcount state. This recreates the container with the latest config on the next session start. It is also used to recover from leaked reference files after a crash. Specified in [DESIGN_EXTENSION.workspace-scoped.md](DESIGN_EXTENSION.workspace-scoped.md) §2.7.
+> **8. `/sandbox-reset` command.** A registered command that force-stops and removes the workspace sandbox container, clearing all refcount state, and recreates a fresh container for the current session. It is also used to recover from stale reference files after a crash. Specified in [DESIGN_EXTENSION.workspace-scoped.md](DESIGN_EXTENSION.workspace-scoped.md) §2.7.
 
 Update DESIGN.md §7 "Filesystem hygiene" row with the "After" column from §5 above.

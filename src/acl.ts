@@ -29,7 +29,7 @@ export function resolvePath(path: string, workspaceAbsolutePath: string): string
   return resolved;
 }
 
-function isNodeError(err: unknown): err is NodeJS.ErrnoException {
+export function isNodeError(err: unknown): err is NodeJS.ErrnoException {
   return err instanceof Error && "code" in err;
 }
 

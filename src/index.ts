@@ -2,7 +2,7 @@ import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { createBashTool, isToolCallEventType } from "@mariozechner/pi-coding-agent";
 import { realpathSync, readdirSync } from "node:fs";
 import Dockerode from "dockerode";
-import { evaluateAccess, resolvePath, resolveSymlinks, type AccessOperation } from "./acl.js";
+import { evaluateAccess, resolvePath, resolveSymlinks, isNodeError, type AccessOperation } from "./acl.js";
 import { loadConfig, validateConfig, augmentConfigWithPiDir, type SandboxConfig } from "./config.js";
 import {
   ensureContainer,
@@ -14,6 +14,8 @@ import {
   getContainerStatus,
 } from "./docker.js";
 import { bashSchema, createBashToolHandler } from "./bash.js";
+import { startSandboxContainer } from "./start-container.js";
+import { createSandboxState, type SandboxState, Mutex } from "./state.js";
 import {
   computeContainerName,
   computeConfigHash,
@@ -21,9 +23,8 @@ import {
   acquireSessionRef,
   releaseSessionRef,
   readStoredConfigHash,
-  writeConfigHash,
   deleteConfigHash,
-  countLeakedRefs,
+  countStaleRefs,
   resetState,
 } from "./lifecycle.js";
 
@@ -58,27 +59,30 @@ export function createSandboxExtension(options: SandboxExtensionOptions = {}): (
     const stopAndRemoveContainerFn = options.stopAndRemoveContainerFn ?? stopAndRemoveContainer;
     const getContainerStatusFn = options.getContainerStatusFn ?? getContainerStatus;
 
-    let workspaceAbsolutePath: string | undefined;
-    let container: Dockerode.Container | undefined;
-    let config: SandboxConfig | undefined;
-    let isPulling = false;
-    let pullError: string | undefined;
+    const state: SandboxState = createSandboxState();
+    const lifecycleMutex = new Mutex();
 
     pi.on("session_shutdown", async (_event, ctx) => {
       if (pi.getFlag("no-sandbox")) {
         return;
       }
-      if (workspaceAbsolutePath === undefined) {
+      if (state.workspaceAbsolutePath === undefined) {
         return;
       }
 
-      const containerName = computeContainerName(workspaceAbsolutePath);
+      const containerName = computeContainerName(state.workspaceAbsolutePath);
       const stateDir = getStateDir(ctx.sessionManager.getSessionDir());
       const isEmpty = releaseSessionRef(stateDir, ctx.sessionManager.getSessionId());
 
       if (isEmpty) {
-        await stopAndRemoveContainerFn(docker, containerName);
-        deleteConfigHash(stateDir);
+        const release = await lifecycleMutex.acquire();
+        try {
+          await stopAndRemoveContainerFn(docker, containerName);
+          state.container = undefined;
+          deleteConfigHash(stateDir);
+        } finally {
+          release();
+        }
       }
     });
 
@@ -99,56 +103,40 @@ export function createSandboxExtension(options: SandboxExtensionOptions = {}): (
 
       const workspacePath = realpathSync(ctx.cwd);
       const containerName = computeContainerName(workspacePath);
-      const configHash = computeConfigHash(loadedConfig);
       const stateDir = getStateDir(ctx.sessionManager.getSessionDir());
 
-      config = loadedConfig;
-      workspaceAbsolutePath = workspacePath;
+      state.config = loadedConfig;
+      state.workspaceAbsolutePath = workspacePath;
 
       acquireSessionRef(stateDir, ctx.sessionManager.getSessionId());
 
-      const imageExists = await doesImageExistFn(docker, loadedConfig.image);
-      if (!imageExists) {
-        isPulling = true;
-        pullError = undefined;
-        pullImageFn(docker, loadedConfig.image)
-          .then(async () => {
-            const { container: runningContainer } = await ensureContainerFn(
-              docker,
-              loadedConfig,
-              workspacePath,
-              containerName,
-            );
-            writeConfigHash(stateDir, configHash);
-            container = runningContainer;
-          })
-          .catch((err: unknown) => {
-            pullError = err instanceof Error ? err.message : String(err);
-          })
-          .finally(() => {
-            isPulling = false;
-          });
-        return;
-      }
-
-      const { container: runningContainer, created } = await ensureContainerFn(
-        docker,
-        loadedConfig,
-        workspacePath,
-        containerName,
-      );
-      if (created) {
-        writeConfigHash(stateDir, configHash);
-      } else {
-        const storedHash = readStoredConfigHash(stateDir);
-        if (storedHash !== undefined && storedHash !== configHash) {
+      const release = await lifecycleMutex.acquire();
+      try {
+        const result = await startSandboxContainer(
+          state,
+          { docker, doesImageExistFn, ensureContainerFn, pullImageFn },
+          loadedConfig,
+          workspacePath,
+          containerName,
+          stateDir,
+        );
+        if (result.kind === "ready" && result.configStaleness) {
           ctx.ui.notify("Sandbox config has changed. Run /sandbox-reset to recreate.", "warning");
         }
-        if (storedHash === undefined) {
-          writeConfigHash(stateDir, configHash);
+        if (result.kind === "pulling") {
+          result.done
+            .then((outcome) => {
+              if (outcome.kind === "error") {
+                ctx.ui.notify(`Sandbox unavailable: ${outcome.message}`, "error");
+              }
+            })
+            .catch(() => {
+              /* ignore unexpected rejection */
+            });
         }
+      } finally {
+        release();
       }
-      container = runningContainer;
     });
 
     pi.on("tool_call", (event, _ctx) => {
@@ -156,7 +144,7 @@ export function createSandboxExtension(options: SandboxExtensionOptions = {}): (
         return undefined;
       }
 
-      if (config === undefined || workspaceAbsolutePath === undefined) {
+      if (state.config === undefined || state.workspaceAbsolutePath === undefined) {
         return { block: true, reason: "Sandbox not initialized" };
       }
 
@@ -175,7 +163,7 @@ export function createSandboxExtension(options: SandboxExtensionOptions = {}): (
         return { block: true, reason: "Missing or invalid path argument" };
       }
 
-      const normalized = resolvePath(path, workspaceAbsolutePath);
+      const normalized = resolvePath(path, state.workspaceAbsolutePath);
 
       let resolved: string;
       try {
@@ -200,7 +188,7 @@ export function createSandboxExtension(options: SandboxExtensionOptions = {}): (
       }
 
       const operation: AccessOperation = event.toolName === "read" ? "read" : "write";
-      const result = evaluateAccess(resolved, operation, config.filesystem, workspaceAbsolutePath);
+      const result = evaluateAccess(resolved, operation, state.config.filesystem, state.workspaceAbsolutePath);
 
       if (!result.allowed) {
         const reason =
@@ -221,7 +209,7 @@ export function createSandboxExtension(options: SandboxExtensionOptions = {}): (
           return;
         }
 
-        const workspacePath = workspaceAbsolutePath ?? realpathSync(ctx.cwd);
+        const workspacePath = state.workspaceAbsolutePath ?? realpathSync(ctx.cwd);
         const containerName = computeContainerName(workspacePath);
         const stateDir = getStateDir(ctx.sessionManager.getSessionDir());
 
@@ -230,11 +218,13 @@ export function createSandboxExtension(options: SandboxExtensionOptions = {}): (
           const { config: loadedConfig } = loadConfigFn(workspacePath);
           augmentConfigWithPiDir(loadedConfig);
           effectiveConfig = loadedConfig;
-        } catch {
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          ctx.ui.notify(`Failed to load sandbox config: ${msg}. Using in-memory config.`, "warning");
           effectiveConfig = {
-            image: config?.image ?? "unknown",
-            env: config?.env ?? {},
-            filesystem: config?.filesystem ?? { rw: [], ro: [] },
+            image: state.config?.image ?? "unknown",
+            env: state.config?.env ?? {},
+            filesystem: state.config?.filesystem ?? { rw: [], ro: [] },
           };
         }
 
@@ -255,8 +245,10 @@ export function createSandboxExtension(options: SandboxExtensionOptions = {}): (
         let sessionIds: string[] = [];
         try {
           sessionIds = readdirSync(`${stateDir}/sessions`);
-        } catch {
-          // ignore
+        } catch (err) {
+          if (!(isNodeError(err) && err.code === "ENOENT")) {
+            throw err;
+          }
         }
 
         let configStaleness: string;
@@ -292,7 +284,7 @@ export function createSandboxExtension(options: SandboxExtensionOptions = {}): (
           return;
         }
 
-        const workspacePath = workspaceAbsolutePath ?? realpathSync(ctx.cwd);
+        const workspacePath = state.workspaceAbsolutePath ?? realpathSync(ctx.cwd);
         const containerName = computeContainerName(workspacePath);
         const stateDir = getStateDir(ctx.sessionManager.getSessionDir());
 
@@ -313,10 +305,43 @@ export function createSandboxExtension(options: SandboxExtensionOptions = {}): (
           return;
         }
 
-        const leaked = countLeakedRefs(stateDir);
-        await stopAndRemoveContainerFn(docker, containerName);
-        resetState(stateDir);
-        ctx.ui.notify(`Reset sandbox container. Removed ${String(leaked)} leaked session reference(s).`, "info");
+        const stale = countStaleRefs(stateDir);
+
+        const release = await lifecycleMutex.acquire();
+        let result: import("./start-container.js").StartSandboxResult | undefined;
+        try {
+          await stopAndRemoveContainerFn(docker, containerName);
+          state.container = undefined;
+          resetState(stateDir);
+
+          if (state.config !== undefined) {
+            acquireSessionRef(stateDir, ctx.sessionManager.getSessionId());
+            result = await startSandboxContainer(
+              state,
+              { docker, doesImageExistFn, ensureContainerFn, pullImageFn },
+              state.config,
+              workspacePath,
+              containerName,
+              stateDir,
+            );
+          }
+        } finally {
+          release();
+        }
+
+        if (result?.kind === "pulling") {
+          result.done
+            .then((outcome) => {
+              if (outcome.kind === "error") {
+                ctx.ui.notify(`Sandbox reset complete, but failed to recreate container: ${outcome.message}`, "warning");
+              }
+            })
+            .catch(() => {
+              /* ignore unexpected rejection */
+            });
+        }
+
+        ctx.ui.notify(`Reset sandbox container. Removed ${String(stale)} stale session reference(s).`, "info");
       },
     });
 
@@ -328,11 +353,7 @@ export function createSandboxExtension(options: SandboxExtensionOptions = {}): (
       execute: createBashToolHandler({
         getNoSandbox: () => pi.getFlag("no-sandbox") as boolean,
         localBash,
-        getIsPulling: () => isPulling,
-        getPullError: () => pullError,
-        getConfig: () => config,
-        getContainer: () => container,
-        getWorkspaceAbsolutePath: () => workspaceAbsolutePath,
+        state,
         execInContainerFn,
       }),
     });
