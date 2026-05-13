@@ -1,3 +1,4 @@
 {
-  "image": "alpine"
+  "image": "alpine",
+  "sidecarVersion": "v1.12.0"
 }
