@@ -42,15 +42,12 @@ import Dockerode from 'dockerode';
 import { existsSync, readdirSync, realpathSync } from 'node:fs';
 
 function buildFallbackConfig(memoryConfig: SandboxConfig | undefined): SandboxConfig {
-  const config: SandboxConfig = {
+  return {
     image: memoryConfig?.image ?? 'unknown',
     env: memoryConfig?.env ?? {},
     filesystem: memoryConfig?.filesystem ?? { rw: [], ro: [] },
+    network: memoryConfig?.network ?? {},
   };
-  if (memoryConfig?.network) {
-    config.network = memoryConfig.network;
-  }
-  return config;
 }
 
 function loadConfigWithFallback(
@@ -70,8 +67,8 @@ function loadConfigWithFallback(
   }
 }
 
-function formatNetworkSection(network: NetworkConfig | undefined): string {
-  if (network === undefined || Object.keys(network).length === 0) {
+function formatNetworkSection(network: NetworkConfig): string {
+  if (Object.keys(network).length === 0) {
     return 'Network: none';
   }
   const allow: string[] = [];

@@ -15,6 +15,7 @@
     ]
   },
   "dependencies": {
+    "deepmerge": "^4.3.1",
     "dockerode": "^4.0.2"
   },
   "devDependencies": {

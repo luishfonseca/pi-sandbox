@@ -1,9 +1,11 @@
 import { isNodeError } from './acl.js';
 import { type NetworkConfig, checkBuiltInDenyOverlaps, extractNetwork } from './network.js';
 import { expandTilde } from './path.js';
+import deepmerge from 'deepmerge';
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 export interface FilesystemConfig {
   rw: string[];
@@ -12,14 +14,15 @@ export interface FilesystemConfig {
 
 export interface SandboxConfig {
   image: string;
-  sidecarImage?: string;
+  sidecarVersion?: string;
   env: Record<string, string>;
   filesystem: FilesystemConfig;
-  network?: NetworkConfig;
+  network: NetworkConfig;
 }
 
-const TOP_LEVEL_KEYS = new Set(['image', 'env', 'filesystem', 'network', 'sidecarImage']);
+const TOP_LEVEL_KEYS = new Set(['image', 'env', 'filesystem', 'network', 'sidecarVersion']);
 const FILESYSTEM_KEYS = new Set(['rw', 'ro']);
+const NETWORK_KEYS = new Set(['domains', 'cidrs', 'denyCidrs']);
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -44,64 +47,42 @@ function readJsonFile(filePath: string): unknown {
   return JSON.parse(content) as unknown;
 }
 
-function loadOptionalConfig(filePath: string): { data: unknown; warnings: string[] } {
+export function loadDefaultsConfig(): unknown {
+  const packageDir = dirname(fileURLToPath(import.meta.url));
+  const defaultsPath = join(packageDir, '..', 'sandbox-default.json');
   try {
-    return { data: readJsonFile(filePath), warnings: [] };
+    return readJsonFile(defaultsPath);
   } catch (err) {
     if (isNodeError(err) && err.code === 'ENOENT') {
-      return { data: {}, warnings: [] };
+      throw new Error(`Package defaults config missing: ${defaultsPath}`);
+    }
+    if (err instanceof SyntaxError) {
+      throw new Error(`Package defaults config is invalid JSON: ${defaultsPath}`);
+    }
+    throw err;
+  }
+}
+
+export function loadOptionalConfig(filePath: string): {
+  data: unknown;
+  warnings: string[];
+  missing: boolean;
+} {
+  try {
+    return { data: readJsonFile(filePath), warnings: [], missing: false };
+  } catch (err) {
+    if (isNodeError(err) && err.code === 'ENOENT') {
+      return { data: {}, warnings: [], missing: true };
     }
     if (err instanceof SyntaxError) {
       return {
         data: {},
         warnings: [`[pi-sandbox] Invalid JSON in ${filePath} — treating as {}`],
+        missing: false,
       };
     }
     throw err;
   }
-}
-
-function loadRequiredConfig(filePath: string): unknown {
-  try {
-    return readJsonFile(filePath);
-  } catch (err) {
-    if (isNodeError(err) && err.code === 'ENOENT') {
-      throw new Error(`Global sandbox config missing: ${filePath}`);
-    }
-    if (err instanceof SyntaxError) {
-      throw new Error(`Global sandbox config is invalid JSON: ${filePath}`);
-    }
-    throw err;
-  }
-}
-
-function extractStringMap(value: unknown, context: string): Record<string, string> {
-  if (!isObject(value)) {
-    return {};
-  }
-  const result: Record<string, string> = {};
-  for (const [k, v] of Object.entries(value)) {
-    if (typeof v !== 'string') {
-      throw new Error(`env value for "${k}" in ${context} must be a string, got ${typeof v}`);
-    }
-    result[k] = v;
-  }
-  return result;
-}
-
-function extractFilesystem(
-  value: unknown,
-  filePath: string,
-): { config: FilesystemConfig; warnings: string[] } {
-  if (!isObject(value)) {
-    return { config: { rw: [], ro: [] }, warnings: [] };
-  }
-  const warnings = collectUnknownKeyWarnings(value, FILESYSTEM_KEYS, filePath);
-
-  const rw = extractStringArray(value.rw).map(expandTilde);
-  const ro = extractStringArray(value.ro).map(expandTilde);
-
-  return { config: { rw, ro }, warnings };
 }
 
 function extractStringArray(value: unknown): string[] {
@@ -111,27 +92,45 @@ function extractStringArray(value: unknown): string[] {
   return value.filter((item): item is string => typeof item === 'string');
 }
 
-function mergeStringMaps(
-  global: Record<string, string>,
-  workspace: Record<string, string>,
-): Record<string, string> {
-  let result: Record<string, string> = { ...global };
-  for (const [key, value] of Object.entries(workspace)) {
-    if (value === '') {
-      const { [key]: _removed, ...rest } = result;
-      result = rest;
-    } else {
-      result[key] = value;
-    }
+function extractFilesystemMerged(value: unknown): {
+  config: FilesystemConfig;
+  warnings: string[];
+} {
+  if (!isObject(value)) {
+    return { config: { rw: [], ro: [] }, warnings: [] };
   }
-  return result;
+  const warnings = collectUnknownKeyWarnings(value, FILESYSTEM_KEYS, 'merged config#filesystem');
+  const rw = extractStringArray(value.rw).map(expandTilde);
+  const ro = extractStringArray(value.ro).map(expandTilde);
+  return { config: { rw, ro }, warnings };
 }
 
-function mergeStringLists(global: string[], workspace: string[]): string[] {
-  if (workspace.length > 0 && workspace[0] === '') {
-    return workspace.slice(1);
+function processNulls(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    const arr = value as unknown[];
+    const lastNullIndex = arr.reduce<number>((acc, item, idx) => (item === null ? idx : acc), -1);
+    if (lastNullIndex !== -1) {
+      return arr.slice(lastNullIndex + 1).map(processNulls);
+    }
+    return arr.map(processNulls);
   }
-  return [...global, ...workspace];
+  if (isObject(value)) {
+    const result: Record<string, unknown> = {};
+    for (const [key, val] of Object.entries(value)) {
+      if (val === null) continue;
+      result[key] = processNulls(val);
+    }
+    return result;
+  }
+  return value;
+}
+
+function normalizeConfig(config: Record<string, unknown>): Record<string, unknown> {
+  const result = { ...config };
+  if (!('env' in result)) result.env = {};
+  if (!('filesystem' in result)) result.filesystem = { rw: [], ro: [] };
+  if (!('network' in result)) result.network = {};
+  return result;
 }
 
 function validatePrefix(prefix: string, context: string): void {
@@ -186,10 +185,10 @@ export function validateConfig(config: SandboxConfig): void {
   }
 
   if (
-    config.sidecarImage !== undefined &&
-    (typeof config.sidecarImage !== 'string' || config.sidecarImage.length === 0)
+    config.sidecarVersion !== undefined &&
+    (typeof config.sidecarVersion !== 'string' || config.sidecarVersion.length === 0)
   ) {
-    throw new Error(`sidecarImage must be a non-empty string`);
+    throw new Error(`sidecarVersion must be a non-empty string`);
   }
 
   for (const [key, value] of Object.entries(config.env)) {
@@ -206,101 +205,105 @@ export function validateConfig(config: SandboxConfig): void {
   }
 }
 
-function resolveImage(
-  workspaceObj: Record<string, unknown>,
-  globalObj: Record<string, unknown>,
-): string {
-  return typeof workspaceObj.image === 'string' && workspaceObj.image.length > 0
-    ? workspaceObj.image
-    : typeof globalObj.image === 'string'
-      ? globalObj.image
-      : '';
-}
+export function mergeConfigs(
+  defaultsRaw: unknown,
+  globalRaw: unknown,
+  workspaceRaw: unknown,
+): { config: SandboxConfig; warnings: string[] } {
+  const warnings: string[] = [];
 
-function resolveSidecarImage(globalObj: Record<string, unknown>): string | undefined {
-  return typeof globalObj.sidecarImage === 'string' && globalObj.sidecarImage.length > 0
-    ? globalObj.sidecarImage
-    : undefined;
-}
-
-function mergeNetwork(
-  workspaceObj: Record<string, unknown>,
-  globalObj: Record<string, unknown>,
-): { config?: NetworkConfig | undefined; warnings: string[] } {
-  const globalNetwork = extractNetwork(globalObj.network, 'global config');
-  const workspaceNetwork = extractNetwork(workspaceObj.network, 'workspace config');
-  const warnings = [...globalNetwork.warnings, ...workspaceNetwork.warnings];
-
-  let config: NetworkConfig | undefined;
-  if (workspaceObj.network !== undefined) {
-    config = workspaceNetwork.config;
-  } else if (globalObj.network !== undefined) {
-    config = globalNetwork.config;
+  for (const [raw, label] of [
+    [defaultsRaw, 'package defaults'],
+    [globalRaw, 'global config'],
+    [workspaceRaw, 'workspace config'],
+  ] as const) {
+    const obj = isObject(raw) ? raw : {};
+    warnings.push(...collectUnknownKeyWarnings(obj, TOP_LEVEL_KEYS, label));
+    if (isObject(obj.network)) {
+      warnings.push(...collectUnknownKeyWarnings(obj.network, NETWORK_KEYS, `${label}#network`));
+    }
   }
 
-  if (config !== undefined) {
-    warnings.push(...checkBuiltInDenyOverlaps(config));
+  const merged = deepmerge.all([
+    isObject(defaultsRaw) ? defaultsRaw : {},
+    isObject(globalRaw) ? globalRaw : {},
+    isObject(workspaceRaw) ? workspaceRaw : {},
+  ]) as Record<string, unknown>;
+
+  const postProcessed = processNulls(merged) as Record<string, unknown>;
+  const normalized = normalizeConfig(postProcessed);
+
+  const { config: filesystem, warnings: fsWarnings } = extractFilesystemMerged(
+    normalized.filesystem,
+  );
+  warnings.push(...fsWarnings);
+
+  const envObj = isObject(normalized.env) ? normalized.env : {};
+  for (const [key, value] of Object.entries(envObj)) {
+    if (typeof value !== 'string') {
+      throw new Error(
+        `env value for "${key}" in merged config must be a string, got ${typeof value}`,
+      );
+    }
+  }
+  const env = envObj as Record<string, string>;
+
+  const config: SandboxConfig = {
+    image: typeof normalized.image === 'string' ? normalized.image : '',
+    env,
+    filesystem,
+    network: isObject(normalized.network) ? normalized.network : {},
+  };
+
+  if (normalized.sidecarVersion !== undefined) {
+    config.sidecarVersion =
+      typeof normalized.sidecarVersion === 'string' ? normalized.sidecarVersion : '';
   }
 
   return { config, warnings };
 }
 
-export function mergeConfigs(
-  globalRaw: unknown,
-  workspaceRaw: unknown,
-): { config: SandboxConfig; warnings: string[] } {
-  const globalObj = isObject(globalRaw) ? globalRaw : {};
-  const workspaceObj = isObject(workspaceRaw) ? workspaceRaw : {};
+export function loadConfig(workspacePath: string): {
+  config: SandboxConfig;
+  warnings: string[];
+} {
+  const defaultsRaw = loadDefaultsConfig();
 
-  const warnings: string[] = [];
-  warnings.push(...collectUnknownKeyWarnings(globalObj, TOP_LEVEL_KEYS, 'global config'));
-  warnings.push(...collectUnknownKeyWarnings(workspaceObj, TOP_LEVEL_KEYS, 'workspace config'));
+  const globalPath = join(homedir(), '.pi', 'sandbox.json');
+  const {
+    data: globalRaw,
+    warnings: globalWarnings,
+    missing: globalMissing,
+  } = loadOptionalConfig(globalPath);
 
-  const globalEnv = extractStringMap(globalObj.env, 'global config');
-  const workspaceEnv = extractStringMap(workspaceObj.env, 'workspace config');
+  const workspaceConfigPath = join(workspacePath, 'sandbox.json');
+  const {
+    data: workspaceRaw,
+    warnings: workspaceWarnings,
+    missing: workspaceMissing,
+  } = loadOptionalConfig(workspaceConfigPath);
 
-  const globalFs = extractFilesystem(globalObj.filesystem, 'global config#filesystem');
-  const workspaceFs = extractFilesystem(workspaceObj.filesystem, 'workspace config#filesystem');
-  warnings.push(...globalFs.warnings, ...workspaceFs.warnings);
+  const { config: merged, warnings: mergeWarnings } = mergeConfigs(
+    defaultsRaw,
+    globalRaw,
+    workspaceRaw,
+  );
 
-  const networkResult = mergeNetwork(workspaceObj, globalObj);
-  warnings.push(...networkResult.warnings);
+  const networkResult = extractNetwork(merged.network, 'merged config');
+  merged.network = networkResult.config ?? {};
+  if (Object.keys(merged.network).length > 0) {
+    mergeWarnings.push(...checkBuiltInDenyOverlaps(merged.network));
+  }
+  mergeWarnings.push(...networkResult.warnings);
 
-  if (workspaceObj.sidecarImage !== undefined) {
+  validateConfig(merged);
+
+  const warnings = [...globalWarnings, ...workspaceWarnings, ...mergeWarnings];
+  if (globalMissing && workspaceMissing) {
     warnings.push(
-      '[pi-sandbox] sidecarImage in workspace config is ignored; set it in global config only',
+      '[pi-sandbox] No sandbox.json found in workspace or ~/.pi. Using package defaults only.',
     );
   }
 
-  const result: SandboxConfig = {
-    image: resolveImage(workspaceObj, globalObj),
-    env: mergeStringMaps(globalEnv, workspaceEnv),
-    filesystem: {
-      rw: mergeStringLists(globalFs.config.rw, workspaceFs.config.rw),
-      ro: mergeStringLists(globalFs.config.ro, workspaceFs.config.ro),
-    },
-  };
-
-  const sidecarImage = resolveSidecarImage(globalObj);
-  if (sidecarImage !== undefined) {
-    result.sidecarImage = sidecarImage;
-  }
-  if (networkResult.config !== undefined) {
-    result.network = networkResult.config;
-  }
-
-  return { config: result, warnings };
-}
-
-export function loadConfig(workspacePath: string): { config: SandboxConfig; warnings: string[] } {
-  const globalPath = join(homedir(), '.pi', 'sandbox.json');
-  const workspaceConfigPath = join(workspacePath, 'sandbox.json');
-
-  const globalRaw = loadRequiredConfig(globalPath);
-  const { data: workspaceRaw, warnings: workspaceWarnings } =
-    loadOptionalConfig(workspaceConfigPath);
-
-  const { config: merged, warnings: mergeWarnings } = mergeConfigs(globalRaw, workspaceRaw);
-  validateConfig(merged);
-  return { config: merged, warnings: [...workspaceWarnings, ...mergeWarnings] };
+  return { config: merged, warnings };
 }

@@ -12,7 +12,12 @@ function makeTempDir(): string {
   return mkdtempSync(join(tmpdir(), 'pi-sandbox-start-test-'));
 }
 
-const config: SandboxConfig = { image: 'alpine', env: {}, filesystem: { rw: [], ro: [] } };
+const config: SandboxConfig = {
+  image: 'alpine',
+  env: {},
+  filesystem: { rw: [], ro: [] },
+  network: {},
+};
 
 describe('startSandboxContainer', () => {
   it('returns ready and sets container when image exists', async () => {

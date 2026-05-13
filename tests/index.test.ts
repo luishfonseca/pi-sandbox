@@ -179,7 +179,12 @@ describe('createSandboxExtension', () => {
   });
 
   it('blocks read outside workspace', async () => {
-    const config: SandboxConfig = { image: 'alpine', env: {}, filesystem: { rw: [], ro: [] } };
+    const config: SandboxConfig = {
+      image: 'alpine',
+      env: {},
+      filesystem: { rw: [], ro: [] },
+      network: {},
+    };
     const pi = createMockPi();
     const mockContainer = {
       inspect: () => Promise.resolve({ State: { Running: true } }),
@@ -203,7 +208,12 @@ describe('createSandboxExtension', () => {
   });
 
   it('allows write inside workspace', async () => {
-    const config: SandboxConfig = { image: 'alpine', env: {}, filesystem: { rw: [], ro: [] } };
+    const config: SandboxConfig = {
+      image: 'alpine',
+      env: {},
+      filesystem: { rw: [], ro: [] },
+      network: {},
+    };
     const pi = createMockPi();
     const mockContainer = {
       inspect: () => Promise.resolve({ State: { Running: true } }),
@@ -247,7 +257,12 @@ describe('createSandboxExtension', () => {
   });
 
   it('reconnects lazily when container was removed externally', async () => {
-    const config: SandboxConfig = { image: 'alpine', env: {}, filesystem: { rw: [], ro: [] } };
+    const config: SandboxConfig = {
+      image: 'alpine',
+      env: {},
+      filesystem: { rw: [], ro: [] },
+      network: {},
+    };
     const pi = createMockPi();
     let inspectCalls = 0;
     const mockContainer = {
@@ -299,7 +314,12 @@ describe('createSandboxExtension', () => {
   });
 
   it('executes bash command via container when ready', async () => {
-    const config: SandboxConfig = { image: 'alpine', env: {}, filesystem: { rw: [], ro: [] } };
+    const config: SandboxConfig = {
+      image: 'alpine',
+      env: {},
+      filesystem: { rw: [], ro: [] },
+      network: {},
+    };
     const pi = createMockPi();
     const mockContainer = {
       inspect: () => Promise.resolve({ State: { Running: true } }),
@@ -341,7 +361,12 @@ describe('createSandboxExtension', () => {
   });
 
   it('truncates bash output exceeding 2000 lines', async () => {
-    const config: SandboxConfig = { image: 'alpine', env: {}, filesystem: { rw: [], ro: [] } };
+    const config: SandboxConfig = {
+      image: 'alpine',
+      env: {},
+      filesystem: { rw: [], ro: [] },
+      network: {},
+    };
     const pi = createMockPi();
     const mockContainer = {
       inspect: () => Promise.resolve({ State: { Running: true } }),
@@ -408,7 +433,12 @@ describe('createSandboxExtension', () => {
   });
 
   it('returns timeout error when command times out', async () => {
-    const config: SandboxConfig = { image: 'alpine', env: {}, filesystem: { rw: [], ro: [] } };
+    const config: SandboxConfig = {
+      image: 'alpine',
+      env: {},
+      filesystem: { rw: [], ro: [] },
+      network: {},
+    };
     const pi = createMockPi();
     const mockContainer = {
       inspect: () => Promise.resolve({ State: { Running: true } }),
@@ -450,7 +480,12 @@ describe('createSandboxExtension', () => {
   });
 
   it('returns abort error when signal is aborted', async () => {
-    const config: SandboxConfig = { image: 'alpine', env: {}, filesystem: { rw: [], ro: [] } };
+    const config: SandboxConfig = {
+      image: 'alpine',
+      env: {},
+      filesystem: { rw: [], ro: [] },
+      network: {},
+    };
     const pi = createMockPi();
     const mockContainer = {
       inspect: () => Promise.resolve({ State: { Running: true } }),
@@ -499,7 +534,12 @@ describe('createSandboxExtension', () => {
   });
 
   it('appends exit code message for non-zero exit', async () => {
-    const config: SandboxConfig = { image: 'alpine', env: {}, filesystem: { rw: [], ro: [] } };
+    const config: SandboxConfig = {
+      image: 'alpine',
+      env: {},
+      filesystem: { rw: [], ro: [] },
+      network: {},
+    };
     const pi = createMockPi();
     const mockContainer = {
       inspect: () => Promise.resolve({ State: { Running: true } }),
@@ -534,7 +574,12 @@ describe('createSandboxExtension', () => {
   });
 
   it('treats timeout <= 0 as absent', async () => {
-    const config: SandboxConfig = { image: 'alpine', env: {}, filesystem: { rw: [], ro: [] } };
+    const config: SandboxConfig = {
+      image: 'alpine',
+      env: {},
+      filesystem: { rw: [], ro: [] },
+      network: {},
+    };
     const pi = createMockPi();
     const mockContainer = {
       inspect: () => Promise.resolve({ State: { Running: true } }),
@@ -576,7 +621,12 @@ describe('createSandboxExtension', () => {
   });
 
   it('returns pull in progress error when image is missing', async () => {
-    const config: SandboxConfig = { image: 'alpine', env: {}, filesystem: { rw: [], ro: [] } };
+    const config: SandboxConfig = {
+      image: 'alpine',
+      env: {},
+      filesystem: { rw: [], ro: [] },
+      network: {},
+    };
     const pi = createMockPi();
 
     let pullResolve: (() => void) | undefined;
@@ -614,7 +664,12 @@ describe('createSandboxExtension', () => {
   });
 
   it('returns pull error when image pull fails', async () => {
-    const config: SandboxConfig = { image: 'alpine', env: {}, filesystem: { rw: [], ro: [] } };
+    const config: SandboxConfig = {
+      image: 'alpine',
+      env: {},
+      filesystem: { rw: [], ro: [] },
+      network: {},
+    };
     const pi = createMockPi();
 
     const ext = createSandboxExtension({
@@ -664,7 +719,12 @@ describe('createSandboxExtension', () => {
   });
 
   it('blocks symlink loop with mapped reason', async () => {
-    const config: SandboxConfig = { image: 'alpine', env: {}, filesystem: { rw: [], ro: [] } };
+    const config: SandboxConfig = {
+      image: 'alpine',
+      env: {},
+      filesystem: { rw: [], ro: [] },
+      network: {},
+    };
     const pi = createMockPi();
     const mockContainer = {
       inspect: () => Promise.resolve({ State: { Running: true } }),
@@ -696,7 +756,12 @@ describe('createSandboxExtension', () => {
   });
 
   it('allows broken symlink inside workspace and delegates ENOENT to native tool', async () => {
-    const config: SandboxConfig = { image: 'alpine', env: {}, filesystem: { rw: [], ro: [] } };
+    const config: SandboxConfig = {
+      image: 'alpine',
+      env: {},
+      filesystem: { rw: [], ro: [] },
+      network: {},
+    };
     const pi = createMockPi();
     const mockContainer = {
       inspect: () => Promise.resolve({ State: { Running: true } }),
@@ -723,7 +788,12 @@ describe('createSandboxExtension', () => {
   });
 
   it('blocks symlink bypass to disallowed external path', async () => {
-    const config: SandboxConfig = { image: 'alpine', env: {}, filesystem: { rw: [], ro: [] } };
+    const config: SandboxConfig = {
+      image: 'alpine',
+      env: {},
+      filesystem: { rw: [], ro: [] },
+      network: {},
+    };
     const pi = createMockPi();
     const mockContainer = {
       inspect: () => Promise.resolve({ State: { Running: true } }),
@@ -758,7 +828,12 @@ describe('createSandboxExtension', () => {
   it('Guard allows read to path under PI_PACKAGE_DIR after augmentation', async () => {
     const originalPiDir = process.env.PI_PACKAGE_DIR;
     process.env.PI_PACKAGE_DIR = '/nix/store/abc/pi-monorepo';
-    const config: SandboxConfig = { image: 'alpine', env: {}, filesystem: { rw: [], ro: [] } };
+    const config: SandboxConfig = {
+      image: 'alpine',
+      env: {},
+      filesystem: { rw: [], ro: [] },
+      network: {},
+    };
     const pi = createMockPi();
     const mockContainer = {
       inspect: () => Promise.resolve({ State: { Running: true } }),
@@ -790,7 +865,12 @@ describe('createSandboxExtension', () => {
   it('presents config warnings via ctx.ui.notify', async () => {
     const originalPiDir = process.env.PI_PACKAGE_DIR;
     process.env.PI_PACKAGE_DIR = '/nix/store/abc/pi-monorepo';
-    const config: SandboxConfig = { image: 'alpine', env: {}, filesystem: { rw: [], ro: [] } };
+    const config: SandboxConfig = {
+      image: 'alpine',
+      env: {},
+      filesystem: { rw: [], ro: [] },
+      network: {},
+    };
     const pi = createMockPi();
     const mockContainer = {
       inspect: () => Promise.resolve({ State: { Running: true } }),
@@ -823,7 +903,12 @@ describe('createSandboxExtension', () => {
   it('presents warning notification when PI_PACKAGE_DIR is not set', async () => {
     const originalPiDir = process.env.PI_PACKAGE_DIR;
     delete process.env.PI_PACKAGE_DIR;
-    const config: SandboxConfig = { image: 'alpine', env: {}, filesystem: { rw: [], ro: [] } };
+    const config: SandboxConfig = {
+      image: 'alpine',
+      env: {},
+      filesystem: { rw: [], ro: [] },
+      network: {},
+    };
     const pi = createMockPi();
     const mockContainer = {
       inspect: () => Promise.resolve({ State: { Running: true } }),
@@ -852,7 +937,12 @@ describe('createSandboxExtension', () => {
   });
 
   it('writes session ref file on first bash call', async () => {
-    const config: SandboxConfig = { image: 'alpine', env: {}, filesystem: { rw: [], ro: [] } };
+    const config: SandboxConfig = {
+      image: 'alpine',
+      env: {},
+      filesystem: { rw: [], ro: [] },
+      network: {},
+    };
     const pi = createMockPi();
     const mockContainer = {
       inspect: () => Promise.resolve({ State: { Running: true } }),
@@ -878,7 +968,12 @@ describe('createSandboxExtension', () => {
   });
 
   it('stops container on session_shutdown when last ref is removed', async () => {
-    const config: SandboxConfig = { image: 'alpine', env: {}, filesystem: { rw: [], ro: [] } };
+    const config: SandboxConfig = {
+      image: 'alpine',
+      env: {},
+      filesystem: { rw: [], ro: [] },
+      network: {},
+    };
     const pi = createMockPi();
     const mockContainer = {
       inspect: () => Promise.resolve({ State: { Running: true } }),
@@ -914,7 +1009,12 @@ describe('createSandboxExtension', () => {
   });
 
   it('does not delete config hash on session_shutdown when stopAndRemoveContainer throws', async () => {
-    const config: SandboxConfig = { image: 'alpine', env: {}, filesystem: { rw: [], ro: [] } };
+    const config: SandboxConfig = {
+      image: 'alpine',
+      env: {},
+      filesystem: { rw: [], ro: [] },
+      network: {},
+    };
     const pi = createMockPi();
     const mockContainer = {
       inspect: () => Promise.resolve({ State: { Running: true } }),
@@ -944,7 +1044,12 @@ describe('createSandboxExtension', () => {
   });
 
   it('leaves container running on session_shutdown when other refs exist', async () => {
-    const config: SandboxConfig = { image: 'alpine', env: {}, filesystem: { rw: [], ro: [] } };
+    const config: SandboxConfig = {
+      image: 'alpine',
+      env: {},
+      filesystem: { rw: [], ro: [] },
+      network: {},
+    };
     const pi = createMockPi();
     const mockContainer = {
       inspect: () => Promise.resolve({ State: { Running: true } }),
@@ -982,7 +1087,12 @@ describe('createSandboxExtension', () => {
   });
 
   it('writes config hash on first bash call', async () => {
-    const config: SandboxConfig = { image: 'alpine', env: {}, filesystem: { rw: [], ro: [] } };
+    const config: SandboxConfig = {
+      image: 'alpine',
+      env: {},
+      filesystem: { rw: [], ro: [] },
+      network: {},
+    };
     const pi = createMockPi();
     const mockContainer = {
       inspect: () => Promise.resolve({ State: { Running: true } }),
@@ -1010,8 +1120,18 @@ describe('createSandboxExtension', () => {
   });
 
   it('emits config staleness warning when reusing container with different config', async () => {
-    const config1: SandboxConfig = { image: 'alpine', env: {}, filesystem: { rw: [], ro: [] } };
-    const config2: SandboxConfig = { image: 'ubuntu', env: {}, filesystem: { rw: [], ro: [] } };
+    const config1: SandboxConfig = {
+      image: 'alpine',
+      env: {},
+      filesystem: { rw: [], ro: [] },
+      network: {},
+    };
+    const config2: SandboxConfig = {
+      image: 'ubuntu',
+      env: {},
+      filesystem: { rw: [], ro: [] },
+      network: {},
+    };
     const notifications: { message: string; type: string }[] = [];
 
     const mockContainer = {
@@ -1054,7 +1174,12 @@ describe('createSandboxExtension', () => {
   });
 
   it('sandbox-reset stops container, clears state, and lazily recreates on next bash call', async () => {
-    const config: SandboxConfig = { image: 'alpine', env: {}, filesystem: { rw: [], ro: [] } };
+    const config: SandboxConfig = {
+      image: 'alpine',
+      env: {},
+      filesystem: { rw: [], ro: [] },
+      network: {},
+    };
     const pi = createMockPi();
     const mockContainer = {
       inspect: () => Promise.resolve({ State: { Running: true } }),
@@ -1111,7 +1236,12 @@ describe('createSandboxExtension', () => {
   });
 
   it('bash works after sandbox-reset', async () => {
-    const config: SandboxConfig = { image: 'alpine', env: {}, filesystem: { rw: [], ro: [] } };
+    const config: SandboxConfig = {
+      image: 'alpine',
+      env: {},
+      filesystem: { rw: [], ro: [] },
+      network: {},
+    };
     const pi = createMockPi();
     const mockContainer = {
       inspect: () => Promise.resolve({ State: { Running: true } }),
@@ -1190,6 +1320,7 @@ describe('createSandboxExtension', () => {
       image: 'alpine',
       env: {},
       filesystem: { rw: ['/tmp/shared'], ro: [] },
+      network: {},
     };
     const pi = createMockPi();
     const mockContainer = {
@@ -1229,8 +1360,18 @@ describe('createSandboxExtension', () => {
   });
 
   it('sandbox-status reports stale config', async () => {
-    const config1: SandboxConfig = { image: 'alpine', env: {}, filesystem: { rw: [], ro: [] } };
-    const config2: SandboxConfig = { image: 'ubuntu', env: {}, filesystem: { rw: [], ro: [] } };
+    const config1: SandboxConfig = {
+      image: 'alpine',
+      env: {},
+      filesystem: { rw: [], ro: [] },
+      network: {},
+    };
+    const config2: SandboxConfig = {
+      image: 'ubuntu',
+      env: {},
+      filesystem: { rw: [], ro: [] },
+      network: {},
+    };
     const pi = createMockPi();
     const mockContainer = {
       inspect: () => Promise.resolve({ State: { Running: true } }),
@@ -1273,7 +1414,12 @@ describe('createSandboxExtension', () => {
   });
 
   it('sandbox-status reports no container', async () => {
-    const config: SandboxConfig = { image: 'alpine', env: {}, filesystem: { rw: [], ro: [] } };
+    const config: SandboxConfig = {
+      image: 'alpine',
+      env: {},
+      filesystem: { rw: [], ro: [] },
+      network: {},
+    };
     const pi = createMockPi();
 
     const notifications: { message: string; type: string }[] = [];
@@ -1295,7 +1441,12 @@ describe('createSandboxExtension', () => {
   });
 
   it('sandbox-status surfaces Docker daemon unreachable', async () => {
-    const config: SandboxConfig = { image: 'alpine', env: {}, filesystem: { rw: [], ro: [] } };
+    const config: SandboxConfig = {
+      image: 'alpine',
+      env: {},
+      filesystem: { rw: [], ro: [] },
+      network: {},
+    };
     const pi = createMockPi();
 
     const notifications: { message: string; type: string }[] = [];

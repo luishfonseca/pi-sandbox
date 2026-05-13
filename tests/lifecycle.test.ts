@@ -43,6 +43,7 @@ describe('computeConfigHash', () => {
       image: 'alpine',
       env: {},
       filesystem: { rw: [], ro: [] },
+      network: {},
     };
     const hash1 = computeConfigHash(config);
     const hash2 = computeConfigHash(config);
@@ -55,11 +56,13 @@ describe('computeConfigHash', () => {
       image: 'alpine',
       env: {},
       filesystem: { rw: [], ro: [] },
+      network: {},
     };
     const config2: SandboxConfig = {
       image: 'ubuntu',
       env: {},
       filesystem: { rw: [], ro: [] },
+      network: {},
     };
     assert.notStrictEqual(computeConfigHash(config1), computeConfigHash(config2));
   });

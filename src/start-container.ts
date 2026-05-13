@@ -40,7 +40,11 @@ export async function startSandboxContainer(
 
   const imagesToCheck = [cfg.image];
   if (activeNetwork) {
-    imagesToCheck.push(cfg.sidecarImage ?? DEFAULT_SIDECAR_IMAGE);
+    imagesToCheck.push(
+      cfg.sidecarVersion
+        ? `ghcr.io/sagernet/sing-box:${cfg.sidecarVersion}`
+        : DEFAULT_SIDECAR_IMAGE,
+    );
   }
 
   const imageExists = await Promise.all(
@@ -121,7 +125,9 @@ async function createContainers(
 
   const sidecarName = computeSidecarName(workspacePath);
   const networkName = computeNetworkName(workspacePath);
-  const sidecarImage = cfg.sidecarImage ?? DEFAULT_SIDECAR_IMAGE;
+  const sidecarImage = cfg.sidecarVersion
+    ? `ghcr.io/sagernet/sing-box:${cfg.sidecarVersion}`
+    : DEFAULT_SIDECAR_IMAGE;
   const configPath = `${stateDir}/sing-box-config.json`;
 
   const ensureNetworkFn = deps.ensureNetworkFn ?? ensureNetwork;
@@ -129,11 +135,7 @@ async function createContainers(
 
   await ensureNetworkFn(deps.docker, networkName);
 
-  const networkConfig = cfg.network;
-  if (!networkConfig) {
-    throw new Error('Network config missing despite hasNetworkPolicy being true');
-  }
-  const singBoxConfig = generateSingBoxConfig(networkConfig);
+  const singBoxConfig = generateSingBoxConfig(cfg.network);
   writeFileSync(configPath, JSON.stringify(singBoxConfig, null, 2));
 
   await ensureSidecarFn(deps.docker, sidecarImage, sidecarName, networkName, configPath);

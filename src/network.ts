@@ -224,8 +224,8 @@ export function generateSingBoxConfig(network: NetworkConfig): unknown {
   };
 }
 
-export function hasNetworkPolicy(config: { network?: NetworkConfig }): boolean {
-  return config.network !== undefined && Object.keys(config.network).length > 0;
+export function hasNetworkPolicy(config: { network: NetworkConfig }): boolean {
+  return Object.keys(config.network).length > 0;
 }
 
 export function checkBuiltInDenyOverlaps(network: NetworkConfig): string[] {
