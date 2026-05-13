@@ -1,4 +1,11 @@
-import { augmentConfigWithPiDir, loadConfig, mergeConfigs, validateConfig } from '../src/config.js';
+import {
+  augmentConfigWithPiDir,
+  loadConfig,
+  loadDefaultsConfig,
+  loadOptionalConfig,
+  mergeConfigs,
+  validateConfig,
+} from '../src/config.js';
 import type { SandboxConfig } from '../src/config.js';
 import assert from 'node:assert';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -10,240 +17,295 @@ function makeTempDir(): string {
   return mkdtempSync(join(tmpdir(), 'pi-sandbox-config-test-'));
 }
 
+function makeBaseConfig(overrides: Partial<SandboxConfig> = {}): SandboxConfig {
+  return {
+    image: 'alpine',
+    env: {},
+    filesystem: { rw: [], ro: [] },
+    network: {},
+    ...overrides,
+  };
+}
+
 describe('mergeConfigs', () => {
-  it('uses global image when workspace image is missing', () => {
-    const { config } = mergeConfigs({ image: 'alpine' }, {});
-    assert.strictEqual(config.image, 'alpine');
+  it('uses workspace image over global over defaults', () => {
+    const { config } = mergeConfigs(
+      { image: 'default' },
+      { image: 'global' },
+      { image: 'workspace' },
+    );
+    assert.strictEqual(config.image, 'workspace');
   });
 
-  it('uses workspace image when present', () => {
-    const { config } = mergeConfigs({ image: 'alpine' }, { image: 'ubuntu' });
-    assert.strictEqual(config.image, 'ubuntu');
+  it('falls back to global when workspace omits image', () => {
+    const { config } = mergeConfigs({ image: 'default' }, { image: 'global' }, {});
+    assert.strictEqual(config.image, 'global');
   });
 
-  it('defaults to empty image when both missing', () => {
-    const { config } = mergeConfigs({}, {});
+  it('falls back to defaults when global and workspace omit image', () => {
+    const { config } = mergeConfigs({ image: 'default' }, {}, {});
+    assert.strictEqual(config.image, 'default');
+  });
+
+  it('deep-merges env from all three layers', () => {
+    const { config } = mergeConfigs({ env: { A: '1' } }, { env: { B: '2' } }, { env: { C: '3' } });
+    assert.deepStrictEqual(config.env, { A: '1', B: '2', C: '3' });
+  });
+
+  it('workspace env overrides global and defaults', () => {
+    const { config } = mergeConfigs(
+      { env: { A: '1', B: '2' } },
+      { env: { B: '3' } },
+      { env: { A: '4' } },
+    );
+    assert.deepStrictEqual(config.env, { A: '4', B: '3' });
+  });
+
+  it('concatenates arrays left-to-right', () => {
+    const { config } = mergeConfigs(
+      { filesystem: { rw: ['/a'] } },
+      { filesystem: { rw: ['/b'] } },
+      { filesystem: { rw: ['/c'] } },
+    );
+    assert.deepStrictEqual(config.filesystem.rw, ['/a', '/b', '/c']);
+  });
+
+  it('deletes object key when value is null', () => {
+    const { config } = mergeConfigs({ image: 'alpine' }, {}, { image: null });
     assert.strictEqual(config.image, '');
   });
 
-  it('merges env with workspace overriding global', () => {
-    const { config } = mergeConfigs({ env: { A: '1', B: '2' } }, { env: { B: '3', C: '4' } });
-    assert.deepStrictEqual(config.env, { A: '1', B: '3', C: '4' });
+  it('deletes nested object key when value is null', () => {
+    const { config } = mergeConfigs({ env: { A: '1' } }, {}, { env: { A: null } });
+    assert.deepStrictEqual(config.env, {});
   });
 
-  it('removes env var when workspace value is empty string', () => {
-    const { config } = mergeConfigs({ env: { A: '1', B: '2' } }, { env: { B: '' } });
-    assert.deepStrictEqual(config.env, { A: '1' });
-  });
-
-  it('throws when global env value is not a string', () => {
-    assert.throws(() => {
-      mergeConfigs({ env: { GOPATH: ['/home/luis/go'] } }, {});
-    }, /env value for "GOPATH" in global config must be a string, got object/);
-  });
-
-  it('throws when workspace env value is not a string', () => {
-    assert.throws(() => {
-      mergeConfigs({}, { env: { GOPATH: ['/home/luis/go'] } });
-    }, /env value for "GOPATH" in workspace config must be a string, got object/);
-  });
-
-  it('appends filesystem lists', () => {
+  it('truncates array at last null', () => {
     const { config } = mergeConfigs(
-      { filesystem: { rw: ['/a'], ro: ['/b'] } },
-      { filesystem: { rw: ['/c'], ro: ['/d'] } },
+      { filesystem: { rw: ['/a'] } },
+      {},
+      { filesystem: { rw: [null, '/b'] } },
     );
-    assert.deepStrictEqual(config.filesystem.rw, ['/a', '/c']);
-    assert.deepStrictEqual(config.filesystem.ro, ['/b', '/d']);
+    assert.deepStrictEqual(config.filesystem.rw, ['/b']);
   });
 
-  it('discards global lists when workspace list starts with empty string', () => {
+  it('empties array when null is the last element', () => {
     const { config } = mergeConfigs(
-      { filesystem: { rw: ['/a'], ro: ['/b'] } },
-      { filesystem: { rw: ['', '/c'], ro: ['', '/d'] } },
+      { filesystem: { rw: ['/a'] } },
+      {},
+      { filesystem: { rw: [null] } },
+    );
+    assert.deepStrictEqual(config.filesystem.rw, []);
+  });
+
+  it('truncates at last null when multiple nulls exist', () => {
+    const { config } = mergeConfigs(
+      { filesystem: { rw: ['/a'] } },
+      { filesystem: { rw: [null, '/b'] } },
+      { filesystem: { rw: [null, '/c'] } },
     );
     assert.deepStrictEqual(config.filesystem.rw, ['/c']);
-    assert.deepStrictEqual(config.filesystem.ro, ['/d']);
   });
 
-  it('ignores unknown keys without throwing', () => {
-    const { config, warnings } = mergeConfigs({ unknown: 'value' }, { alsoUnknown: 123 });
-    assert.strictEqual(config.image, '');
-    assert.strictEqual(warnings.length, 2);
-    assert.ok(warnings.some((w) => w.includes('Unknown key "unknown"')));
-    assert.ok(warnings.some((w) => w.includes('Unknown key "alsoUnknown"')));
-  });
-
-  it('expands ~ in filesystem prefixes', () => {
+  it('concatenates arrays when no null is present', () => {
     const { config } = mergeConfigs(
-      { filesystem: { rw: ['~/.pi/shared'], ro: ['~'] } },
-      { filesystem: { rw: ['~/workspace'], ro: [] } },
+      { filesystem: { rw: ['/a'] } },
+      { filesystem: { rw: [] } },
+      { filesystem: { rw: ['/b'] } },
+    );
+    assert.deepStrictEqual(config.filesystem.rw, ['/a', '/b']);
+  });
+
+  it('applies normalization after null processing', () => {
+    const { config } = mergeConfigs({ env: { A: '1' } }, { env: { A: null } }, {});
+    assert.deepStrictEqual(config.env, {});
+    assert.deepStrictEqual(config.filesystem, { rw: [], ro: [] });
+    assert.deepStrictEqual(config.network, {});
+  });
+
+  it('normalizes missing optional keys', () => {
+    const { config } = mergeConfigs({}, {}, {});
+    assert.deepStrictEqual(config.env, {});
+    assert.deepStrictEqual(config.filesystem, { rw: [], ro: [] });
+    assert.deepStrictEqual(config.network, {});
+  });
+
+  it('passes sidecarVersion through from defaults', () => {
+    const { config } = mergeConfigs({ sidecarVersion: 'v1.0.0' }, {}, {});
+    assert.strictEqual(config.sidecarVersion, 'v1.0.0');
+  });
+
+  it('workspace sidecarVersion overrides defaults', () => {
+    const { config } = mergeConfigs(
+      { sidecarVersion: 'v1.0.0' },
+      { sidecarVersion: 'v1.1.0' },
+      { sidecarVersion: 'v1.2.0' },
+    );
+    assert.strictEqual(config.sidecarVersion, 'v1.2.0');
+  });
+
+  it('warns for unknown top-level keys in each layer', () => {
+    const { warnings } = mergeConfigs(
+      { unknownDefault: 'x' },
+      { unknownGlobal: 'y' },
+      { unknownWorkspace: 'z' },
+    );
+    assert.ok(warnings.some((w) => w.includes('unknownDefault')));
+    assert.ok(warnings.some((w) => w.includes('unknownGlobal')));
+    assert.ok(warnings.some((w) => w.includes('unknownWorkspace')));
+  });
+
+  it('warns for unknown network keys in each layer', () => {
+    const { warnings } = mergeConfigs(
+      { network: { bad: 1 } },
+      { network: { worse: 2 } },
+      { network: { awful: 3 } },
+    );
+    assert.ok(warnings.some((w) => w.includes('bad')));
+    assert.ok(warnings.some((w) => w.includes('worse')));
+    assert.ok(warnings.some((w) => w.includes('awful')));
+  });
+
+  it('expands tilde in filesystem prefixes', () => {
+    const { config } = mergeConfigs(
+      { filesystem: { rw: ['~/.pi/shared'] } },
+      { filesystem: { rw: ['~/global'] } },
+      { filesystem: { rw: ['~/workspace'] } },
     );
     assert.deepStrictEqual(config.filesystem.rw, [
       resolve(homedir(), '.pi/shared'),
+      resolve(homedir(), 'global'),
       resolve(homedir(), 'workspace'),
     ]);
-    assert.deepStrictEqual(config.filesystem.ro, [homedir()]);
   });
 
-  it('ignores workspace sidecarImage and uses global', () => {
-    const { config, warnings } = mergeConfigs(
-      { image: 'alpine', sidecarImage: 'global-sidecar' },
-      { sidecarImage: 'workspace-sidecar' },
-    );
-    assert.strictEqual(config.sidecarImage, 'global-sidecar');
-    assert.ok(warnings.some((w) => w.includes('sidecarImage in workspace config is ignored')));
+  it('throws when env value is not a string', () => {
+    assert.throws(() => {
+      mergeConfigs({}, {}, { env: { GOPATH: ['/home/luis/go'] } });
+    }, /env value for "GOPATH" in merged config must be a string, got object/);
   });
 
-  it('uses global sidecarImage when workspace is absent', () => {
-    const { config } = mergeConfigs({ image: 'alpine', sidecarImage: 'global-sidecar' }, {});
-    assert.strictEqual(config.sidecarImage, 'global-sidecar');
-  });
-
-  it('omits sidecarImage when both missing', () => {
-    const { config } = mergeConfigs({ image: 'alpine' }, {});
-    assert.strictEqual(config.sidecarImage, undefined);
-  });
-
-  it('replaces global network with workspace network', () => {
-    const { config } = mergeConfigs(
-      { image: 'alpine', network: { domains: ['global.test'] } },
-      { image: 'alpine', network: { domains: ['workspace.test'] } },
-    );
-    assert.deepStrictEqual(config.network, { domains: ['workspace.test'] });
-  });
-
-  it('uses global network when workspace is absent', () => {
-    const { config } = mergeConfigs({ image: 'alpine', network: { domains: ['global.test'] } }, {});
-    assert.deepStrictEqual(config.network, { domains: ['global.test'] });
-  });
-
-  it('omits network when workspace sets empty object to override global', () => {
-    const { config } = mergeConfigs(
-      { image: 'alpine', network: { domains: ['global.test'] } },
-      { image: 'alpine', network: {} },
-    );
-    assert.strictEqual(config.network, undefined);
-  });
-
-  it('omits network when both absent', () => {
-    const { config } = mergeConfigs({ image: 'alpine' }, {});
-    assert.strictEqual(config.network, undefined);
-  });
-
-  it('warns when user cidrs match a built-in private-range deny', () => {
-    const { config, warnings } = mergeConfigs(
-      { image: 'alpine' },
-      { image: 'alpine', network: { cidrs: ['10.0.0.0/8'] } },
-    );
-    assert.deepStrictEqual(config.network, { cidrs: ['10.0.0.0/8'] });
-    assert.ok(warnings.some((w) => w.includes('matches a built-in private-range deny')));
+  it('throws when a nested env value is not a string', () => {
+    assert.throws(() => {
+      mergeConfigs({ env: { A: '1' } }, { env: { B: 2 } }, {});
+    }, /env value for "B" in merged config must be a string, got number/);
   });
 });
 
 describe('validateConfig', () => {
   it('passes for valid config', () => {
-    validateConfig({
-      image: 'alpine',
-      env: {},
-      filesystem: { rw: ['/tmp'], ro: ['/etc'] },
-    });
+    validateConfig(makeBaseConfig());
   });
 
   it('throws when image is missing', () => {
     assert.throws(() => {
-      validateConfig({
-        image: '',
-        env: {},
-        filesystem: { rw: [], ro: [] },
-      });
+      validateConfig(makeBaseConfig({ image: '' }));
     }, /non-empty "image"/);
   });
 
   it('throws when image is not a string', () => {
     assert.throws(() => {
-      validateConfig({
-        image: 123 as unknown as string,
-        env: {},
-        filesystem: { rw: [], ro: [] },
-      });
+      validateConfig(makeBaseConfig({ image: 123 as unknown as string }));
     }, /non-empty "image"/);
   });
 
   it('throws when env value is not a string', () => {
     assert.throws(() => {
-      validateConfig({
-        image: 'alpine',
-        env: { GOPATH: ['/home/luis/go'] as unknown as string },
-        filesystem: { rw: [], ro: [] },
-      });
+      validateConfig(makeBaseConfig({ env: { GOPATH: ['/home/luis/go'] as unknown as string } }));
     }, /env value for "GOPATH" must be a string, got object/);
   });
 
   it('throws for non-absolute rw prefix', () => {
     assert.throws(() => {
-      validateConfig({
-        image: 'alpine',
-        env: {},
-        filesystem: { rw: ['relative'], ro: [] },
-      });
+      validateConfig(makeBaseConfig({ filesystem: { rw: ['relative'], ro: [] } }));
     }, /must be absolute/);
   });
 
   it('throws for wildcard in ro prefix', () => {
     assert.throws(() => {
-      validateConfig({
-        image: 'alpine',
-        env: {},
-        filesystem: { rw: [], ro: ['/etc/*'] },
-      });
+      validateConfig(makeBaseConfig({ filesystem: { rw: [], ro: ['/etc/*'] } }));
     }, /must not contain wildcards/);
   });
 
   it('throws for double-dot in rw prefix', () => {
     assert.throws(() => {
-      validateConfig({
-        image: 'alpine',
-        env: {},
-        filesystem: { rw: ['/foo/../bar'], ro: [] },
-      });
+      validateConfig(makeBaseConfig({ filesystem: { rw: ['/foo/../bar'], ro: [] } }));
     }, /must not contain "\.\."/);
   });
 
   it('throws for trailing slash in ro prefix', () => {
     assert.throws(() => {
-      validateConfig({
-        image: 'alpine',
-        env: {},
-        filesystem: { rw: [], ro: ['/etc/'] },
-      });
+      validateConfig(makeBaseConfig({ filesystem: { rw: [], ro: ['/etc/'] } }));
     }, /must not end with "\/"/);
   });
 
+  it('throws when sidecarVersion is empty string', () => {
+    assert.throws(() => {
+      validateConfig(makeBaseConfig({ sidecarVersion: '' }));
+    }, /sidecarVersion must be a non-empty string/);
+  });
+
   it('allows root slash as prefix', () => {
-    validateConfig({
-      image: 'alpine',
-      env: {},
-      filesystem: { rw: ['/'], ro: [] },
-    });
+    validateConfig(makeBaseConfig({ filesystem: { rw: ['/'], ro: [] } }));
   });
 
   it('allows ~ expanded to homedir', () => {
-    validateConfig({
-      image: 'alpine',
-      env: {},
-      filesystem: { rw: [homedir()], ro: [resolve(homedir(), '.pi/shared')] },
-    });
+    validateConfig(
+      makeBaseConfig({
+        filesystem: { rw: [homedir()], ro: [resolve(homedir(), '.pi/shared')] },
+      }),
+    );
   });
 
   it('throws for ~user treated as literal non-absolute path', () => {
     assert.throws(() => {
-      validateConfig({
-        image: 'alpine',
-        env: {},
-        filesystem: { rw: ['~user/foo'], ro: [] },
-      });
+      validateConfig(makeBaseConfig({ filesystem: { rw: ['~user/foo'], ro: [] } }));
     }, /must be absolute/);
+  });
+});
+
+describe('loadDefaultsConfig', () => {
+  it('reads the package defaults file', () => {
+    const data = loadDefaultsConfig();
+    assert.ok(isObject(data));
+    assert.strictEqual(typeof data.image, 'string');
+  });
+});
+
+describe('loadOptionalConfig', () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = makeTempDir();
+  });
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('reads valid JSON', () => {
+    const path = join(tmpDir, 'config.json');
+    writeFileSync(path, JSON.stringify({ image: 'test' }));
+    const result = loadOptionalConfig(path);
+    assert.deepStrictEqual(result.data, { image: 'test' });
+    assert.deepStrictEqual(result.warnings, []);
+    assert.strictEqual(result.missing, false);
+  });
+
+  it('returns empty object when file is missing', () => {
+    const result = loadOptionalConfig(join(tmpDir, 'missing.json'));
+    assert.deepStrictEqual(result.data, {});
+    assert.deepStrictEqual(result.warnings, []);
+    assert.strictEqual(result.missing, true);
+  });
+
+  it('returns empty object with warning for invalid JSON', () => {
+    const path = join(tmpDir, 'bad.json');
+    writeFileSync(path, 'not json');
+    const result = loadOptionalConfig(path);
+    assert.deepStrictEqual(result.data, {});
+    assert.ok(result.warnings.some((w) => w.includes('Invalid JSON')));
+    assert.strictEqual(result.missing, false);
   });
 });
 
@@ -263,19 +325,13 @@ describe('loadConfig', () => {
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  it('loads global config and optional workspace config', () => {
+  it('loads and merges all three layers', () => {
     const globalPath = join(tmpDir, '.pi');
-    writeFileSync(
-      join(globalPath, 'sandbox.json'),
-      JSON.stringify({ image: 'global', env: { A: '1' } }),
-    );
-    writeFileSync(
-      join(tmpDir, 'sandbox.json'),
-      JSON.stringify({ image: 'workspace', filesystem: { rw: ['/tmp'] } }),
-    );
+    writeFileSync(join(globalPath, 'sandbox.json'), JSON.stringify({ env: { A: '1' } }));
+    writeFileSync(join(tmpDir, 'sandbox.json'), JSON.stringify({ filesystem: { rw: ['/tmp'] } }));
 
     const { config, warnings } = loadConfig(tmpDir);
-    assert.strictEqual(config.image, 'workspace');
+    assert.strictEqual(config.image, 'alpine'); // from defaults
     assert.deepStrictEqual(config.env, { A: '1' });
     assert.deepStrictEqual(config.filesystem.rw, ['/tmp']);
     assert.deepStrictEqual(warnings, []);
@@ -289,14 +345,17 @@ describe('loadConfig', () => {
     assert.deepStrictEqual(warnings, []);
   });
 
-  it('throws when global config is missing', () => {
-    assert.throws(() => loadConfig(tmpDir), /Global sandbox config missing/);
+  it('treats missing global config as empty', () => {
+    writeFileSync(join(tmpDir, 'sandbox.json'), JSON.stringify({ image: 'workspace' }));
+    const { config, warnings } = loadConfig(tmpDir);
+    assert.strictEqual(config.image, 'workspace');
+    assert.deepStrictEqual(warnings, []);
   });
 
-  it('throws when global config is invalid JSON', () => {
-    const globalPath = join(tmpDir, '.pi');
-    writeFileSync(join(globalPath, 'sandbox.json'), 'not json');
-    assert.throws(() => loadConfig(tmpDir), /Global sandbox config is invalid JSON/);
+  it('warns when both global and workspace are missing', () => {
+    const { config, warnings } = loadConfig(tmpDir);
+    assert.strictEqual(config.image, 'alpine');
+    assert.ok(warnings.some((w) => w.includes('No sandbox.json found in workspace or ~/.pi')));
   });
 
   it('treats invalid workspace config as empty with a warning', () => {
@@ -309,17 +368,44 @@ describe('loadConfig', () => {
     assert.ok(warnings[0]?.includes('Invalid JSON'));
   });
 
-  it('throws when workspace env value is not a string', () => {
+  it('treats invalid global config as empty with a warning', () => {
     const globalPath = join(tmpDir, '.pi');
-    writeFileSync(join(globalPath, 'sandbox.json'), JSON.stringify({ image: 'global' }));
+    writeFileSync(join(globalPath, 'sandbox.json'), 'bad json');
+    writeFileSync(join(tmpDir, 'sandbox.json'), JSON.stringify({ image: 'workspace' }));
+    const { config, warnings } = loadConfig(tmpDir);
+    assert.strictEqual(config.image, 'workspace');
+    assert.strictEqual(warnings.length, 1);
+    assert.ok(warnings[0]?.includes('Invalid JSON'));
+  });
+
+  it('throws when workspace env value is not a string', () => {
     writeFileSync(
       join(tmpDir, 'sandbox.json'),
-      JSON.stringify({ image: 'workspace', env: { GOPATH: ['/home/luis/go'] } }),
+      JSON.stringify({ env: { GOPATH: ['/home/luis/go'] } }),
     );
     assert.throws(
       () => loadConfig(tmpDir),
-      /env value for "GOPATH" in workspace config must be a string, got object/,
+      /env value for "GOPATH" in merged config must be a string, got object/,
     );
+  });
+
+  it('warns for unknown keys in workspace config', () => {
+    writeFileSync(
+      join(tmpDir, 'sandbox.json'),
+      JSON.stringify({ image: 'workspace', unknownKey: 'value' }),
+    );
+    const { warnings } = loadConfig(tmpDir);
+    assert.ok(warnings.some((w) => w.includes('Unknown key "unknownKey"')));
+  });
+
+  it('warns for unknown keys in global config', () => {
+    const globalPath = join(tmpDir, '.pi');
+    writeFileSync(
+      join(globalPath, 'sandbox.json'),
+      JSON.stringify({ image: 'global', unknownKey: 'value' }),
+    );
+    const { warnings } = loadConfig(tmpDir);
+    assert.ok(warnings.some((w) => w.includes('Unknown key "unknownKey"')));
   });
 });
 
@@ -335,7 +421,7 @@ describe('augmentConfigWithPiDir', () => {
   });
 
   function makeConfig(): SandboxConfig {
-    return { image: 'alpine', env: {}, filesystem: { rw: [], ro: [] } };
+    return { image: 'alpine', env: {}, filesystem: { rw: [], ro: [] }, network: {} };
   }
 
   it('appends PI_PACKAGE_DIR to ro when set', () => {
@@ -379,3 +465,7 @@ describe('augmentConfigWithPiDir', () => {
     }, /must be absolute/);
   });
 });
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}

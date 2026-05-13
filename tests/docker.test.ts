@@ -88,6 +88,7 @@ describeIntegration('ensureContainer integration', () => {
       image: IMAGE,
       env: {},
       filesystem: { rw: [], ro: [] },
+      network: {},
     };
     const { container } = await ensureContainer(docker, config, tmp, containerName);
     const info = await container.inspect();
@@ -102,6 +103,7 @@ describeIntegration('ensureContainer integration', () => {
       image: IMAGE,
       env: {},
       filesystem: { rw: [], ro: [] },
+      network: {},
     };
     const { container: first } = await ensureContainer(docker, config, tmp, containerName);
     const { container: second } = await ensureContainer(docker, config, tmp, containerName);
@@ -116,6 +118,7 @@ describeIntegration('ensureContainer integration', () => {
       image: IMAGE,
       env: {},
       filesystem: { rw: [], ro: [] },
+      network: {},
     };
     const { container } = await ensureContainer(docker, config, tmp, containerName);
     await container.stop({ t: 1 });
@@ -302,6 +305,7 @@ describe('ensureContainer name conflict', () => {
       image: 'alpine',
       env: {},
       filesystem: { rw: [], ro: [] },
+      network: {},
     };
     const { container } = await ensureContainer(docker, config, '/workspace', 'test-conflict');
     const info = await container.inspect();
@@ -329,6 +333,7 @@ describe('ensureContainer name conflict', () => {
       image: 'alpine',
       env: {},
       filesystem: { rw: [], ro: [] },
+      network: {},
     };
     await assert.rejects(
       () => ensureContainer(docker, config, '/workspace', 'test-conflict-vanished'),
@@ -348,6 +353,7 @@ describeIntegration('execInContainer integration', () => {
       image: IMAGE,
       env: {},
       filesystem: { rw: [], ro: [] },
+      network: {},
     };
     container = (await ensureContainer(docker, config, tmp, containerName)).container;
   });

@@ -130,10 +130,6 @@ describe('extractNetwork', () => {
 });
 
 describe('hasNetworkPolicy', () => {
-  it('returns false when network is undefined', () => {
-    assert.strictEqual(hasNetworkPolicy({}), false);
-  });
-
   it('returns false when network is empty object', () => {
     assert.strictEqual(hasNetworkPolicy({ network: {} }), false);
   });

@@ -55,7 +55,7 @@ interface SandboxConfig {
 - `network.cidrs`, if present, MUST be an array of strings that each parse as a valid IPv4 CIDR block. Single IPs MUST be normalized to `"x.x.x.x/32"`.
 - `network.denyCidrs`, if present, MUST be an array of strings that each parse as a valid IPv4 CIDR block. Single IPs MUST be normalized to `"x.x.x.x/32"`.
 - `sidecarVersion`, if present, MUST be a non-empty string. Any value valid as a Docker image tag or digest suffix is accepted. The full image reference is always `ghcr.io/sagernet/sing-box:{sidecarVersion}`.
-- Unknown keys inside `network` MUST be treated as a validation error.
+- Unknown keys inside `network` MUST be ignored with a warning.
 
 ### 2.2 Merge Rules
 
