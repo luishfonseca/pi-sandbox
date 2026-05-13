@@ -39,12 +39,15 @@ The system MUST NOT:
 
 ### 3.1 Source of Truth
 
-The extension reads two files and merges them into a single effective configuration:
+The extension reads **three** config layers and merges them into a single effective configuration. Higher layers override lower layers.
 
-1. **Global config:** `~/.pi/sandbox.json` (required). If the file is missing or invalid JSON, session start MUST fail with an explicit error.
-2. **Workspace config:** `sandbox.json` in the workspace root (`process.cwd()` at session start). If missing or invalid JSON, treated as `{}` with a warning.
+1. **Package defaults:** `sandbox-default.json` in the extension package directory. Always loaded. MUST be valid JSON. No config values are hardcoded in source code; all defaults live in this file.
+2. **Global config:** `~/.pi/sandbox.json`. Optional. Missing or invalid JSON → treated as `{}` with a warning.
+3. **Workspace config:** `sandbox.json` in the workspace root (`process.cwd()` at session start). Optional. Missing or invalid JSON → treated as `{}` with a warning.
 
-The merged configuration follows the schema in §3.2.
+**Precondition:** Neither global nor workspace config is required. If **both** are missing from disk, the extension emits a single warning: `"No sandbox.json found in workspace or ~/.pi. Using package defaults only."` Session start does **not** fail.
+
+**Postcondition:** The three layers are merged per §3.3, normalized per §3.2, and then validated.
 
 ### 3.2 Schema
 
@@ -57,6 +60,8 @@ interface SandboxConfig {
     rw?: string[];  // Path prefixes allowed read-write for tool calls and bind-mounted rw
     ro?: string[];  // Path prefixes allowed read-only for tool calls and bind-mounted ro
   };
+  network?: NetworkConfig;    // Egress filtering policy. See DESIGN_EXTENSION.network-sidecar.md.
+  sidecarVersion?: string;    // sing-box version tag or digest.
 }
 ```
 
@@ -66,16 +71,39 @@ interface SandboxConfig {
 - All `env` values MUST be strings. If an `env` value is not a string, the extension MUST throw an error naming the key and actual type.
 - Unknown keys MUST be ignored with a warning.
 
-**No hardcoded defaults.** If `rw` or `ro` is absent after merging, it is empty (`[]`).
+**Structural defaults.** After merge resolution (§3.3), the extension normalizes the result by filling any **missing** optional keys with their default values:
+- `env` → `{}`
+- `filesystem` → `{ rw: [], ro: [] }`
+- `network` → `{}` (disabled — no sidecar, `NetworkMode: "none"`)
+
+The `image` field has no structural default. It MUST be present and non-empty in at least one layer (typically the package defaults). If `image` is missing or empty after merge and normalization, validation fails.
 
 ### 3.3 Config Merge Rules
 
-The global config and workspace config share the schema in §3.2. They are merged field-by-field with the following rules:
+The three layers (§3.1) are merged with `deepmerge.all([defaults, global, workspace])` using **default settings** — objects deep-merge, arrays concatenate. No custom merge hooks are required.
 
-- **Scalars (`image`)** — the workspace value wins if present; otherwise the global value is used.
-- **Records (`env`)** — merge the two objects. Workspace keys override global keys. If a workspace key has an empty string value (`""`), the environment variable is removed from the effective config even if it was present globally.
-- **Lists (`filesystem.rw` and `filesystem.ro`)** — append workspace entries to global entries. If the workspace list begins with an empty string (`""`), discard the global list entirely and keep only the workspace entries that follow the empty string.
-- **Unknown keys** — ignored with a warning from each file independently.
+After deepmerge produces the raw merged object, the extension performs a single recursive post-processing pass:
+
+**1. `null` key deletion.** In any object, a property whose value is `null` is deleted. `null` does not fall through to a lower layer; the key is removed entirely.
+- `{ image: "alpine" } + { image: null } → {}` (key `image` deleted)
+- `{ env: { A: "1" } } + { env: { A: null } } → { env: {} }` (key `A` removed from env)
+- `{ filesystem: { rw: ["/a"] } } + { filesystem: { rw: null } } → { filesystem: {} }` (key `rw` deleted)
+- `{ network: { domains: ["x"] } } + { network: null } → {}` (key `network` deleted)
+
+**2. Array truncation.** In any array, find the last `null`. If one exists, the array is replaced by the slice after it (everything up to and including that `null` is dropped). If `null` is the last element, the result is `[]`.
+- `{ rw: ["/a"] } + { rw: ["/b"] } → { rw: ["/a", "/b"] }` (no `null`)
+- `{ rw: ["/a"] } + { rw: [null, "/b"] } → { rw: ["/a", null, "/b"] } → { rw: ["/b"] }`
+- `{ rw: ["/a"] } + { rw: [null] } → { rw: ["/a", null] } → { rw: [] }`
+- `{ rw: ["/a", null] } + { rw: ["/b"] } → { rw: ["/a", null, "/b"] } → { rw: ["/b"] }`
+
+Arrays never legitimately contain `null` as a value; its only purpose is the truncation sentinel.
+
+**3. Normalization.** After the `null` pass, the extension fills any still-missing optional keys with their structural defaults:
+1. If `env` is missing, set it to `{}`.
+2. If `filesystem` is missing, set it to `{ rw: [], ro: [] }`.
+3. If `network` is missing, set it to `{}`.
+
+Normalization runs **before** validation. A `null` delete of an optional key is therefore not an error; it simply causes the structural default to be applied.
 
 ### 3.4 CLI Flag
 
