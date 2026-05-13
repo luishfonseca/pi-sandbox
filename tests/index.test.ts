@@ -1,7 +1,7 @@
 import type { SandboxConfig } from '../src/config.js';
 import { DockerDaemonUnreachableError } from '../src/docker.js';
 import { createSandboxExtension } from '../src/index.js';
-import type { ExtensionAPI, ExtensionContext } from '@mariozechner/pi-coding-agent';
+import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import type { Container } from 'dockerode';
 import assert from 'node:assert';
 import { existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';

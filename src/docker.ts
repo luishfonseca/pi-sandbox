@@ -1,7 +1,11 @@
 import { isNodeError } from './acl.js';
 import type { FilesystemConfig, SandboxConfig } from './config.js';
-import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, truncateTail } from '@mariozechner/pi-coding-agent';
-import type { TruncationResult } from '@mariozechner/pi-coding-agent';
+import {
+  DEFAULT_MAX_BYTES,
+  DEFAULT_MAX_LINES,
+  truncateTail,
+} from '@earendil-works/pi-coding-agent';
+import type { TruncationResult } from '@earendil-works/pi-coding-agent';
 import Dockerode from 'dockerode';
 import { mkdirSync } from 'node:fs';
 import { kill } from 'node:process';

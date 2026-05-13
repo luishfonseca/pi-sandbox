@@ -36,8 +36,8 @@ import {
 } from './lifecycle.js';
 import { hasNetworkPolicy, stopAndRemoveNetwork, type NetworkConfig } from './network.js';
 import { Mutex, type SandboxState, createSandboxState } from './state.js';
-import type { ExtensionAPI } from '@mariozechner/pi-coding-agent';
-import { createBashTool, isToolCallEventType } from '@mariozechner/pi-coding-agent';
+import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
+import { createBashTool, isToolCallEventType } from '@earendil-works/pi-coding-agent';
 import Dockerode from 'dockerode';
 import { existsSync, readdirSync, realpathSync } from 'node:fs';
 
