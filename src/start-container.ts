@@ -12,7 +12,17 @@ import type { SandboxState } from './state.js';
 import type Dockerode from 'dockerode';
 import { writeFileSync } from 'node:fs';
 
-export const DEFAULT_SIDECAR_IMAGE = 'ghcr.io/sagernet/sing-box:v1.12.0';
+const SIDECAR_IMAGE_BASE = 'ghcr.io/sagernet/sing-box';
+
+function resolveSidecarImage(sidecarVersion: string | undefined): string {
+  if (sidecarVersion === undefined) {
+    throw new Error(
+      'sidecarVersion is required when network policy is active but is undefined. ' +
+        'Set it in sandbox-default.json, ~/.pi/sandbox.json, or workspace sandbox.json.',
+    );
+  }
+  return `${SIDECAR_IMAGE_BASE}:${sidecarVersion}`;
+}
 
 export type StartSandboxResult =
   | { kind: 'ready'; configStaleness: boolean }
@@ -40,11 +50,7 @@ export async function startSandboxContainer(
 
   const imagesToCheck = [cfg.image];
   if (activeNetwork) {
-    imagesToCheck.push(
-      cfg.sidecarVersion
-        ? `ghcr.io/sagernet/sing-box:${cfg.sidecarVersion}`
-        : DEFAULT_SIDECAR_IMAGE,
-    );
+    imagesToCheck.push(resolveSidecarImage(cfg.sidecarVersion));
   }
 
   const imageExists = await Promise.all(
@@ -125,9 +131,7 @@ async function createContainers(
 
   const sidecarName = computeSidecarName(workspacePath);
   const networkName = computeNetworkName(workspacePath);
-  const sidecarImage = cfg.sidecarVersion
-    ? `ghcr.io/sagernet/sing-box:${cfg.sidecarVersion}`
-    : DEFAULT_SIDECAR_IMAGE;
+  const sidecarImage = resolveSidecarImage(cfg.sidecarVersion);
   const configPath = `${stateDir}/sing-box-config.json`;
 
   const ensureNetworkFn = deps.ensureNetworkFn ?? ensureNetwork;
