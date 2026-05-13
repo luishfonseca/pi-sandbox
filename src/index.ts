@@ -1,40 +1,45 @@
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { createBashTool, isToolCallEventType } from "@mariozechner/pi-coding-agent";
-import { realpathSync, readdirSync } from "node:fs";
-import Dockerode from "dockerode";
-import { evaluateAccess, resolvePath, resolveSymlinks, isNodeError, type AccessOperation } from "./acl.js";
-import { loadConfig, validateConfig, augmentConfigWithPiDir, type SandboxConfig } from "./config.js";
 import {
-  ensureContainer,
-  execInContainer,
+  type AccessOperation,
+  evaluateAccess,
+  isNodeError,
+  resolvePath,
+  resolveSymlinks,
+} from './acl.js';
+import { bashSchema, createBashToolHandler, createEnsureConnected } from './bash.js';
+import {
+  type SandboxConfig,
+  augmentConfigWithPiDir,
+  loadConfig,
+  validateConfig,
+} from './config.js';
+import {
   DockerDaemonUnreachableError,
   doesImageExist,
+  ensureContainer,
+  execInContainer,
+  getContainerStatus,
   pullImage,
   stopAndRemoveContainer,
-  getContainerStatus,
-  ensureNetwork,
-  ensureSidecarContainer,
   stopAndRemoveSidecar,
-  isSidecarHealthy,
-  watchSidecarEvents,
-  killContainer,
-} from "./docker.js";
-import { bashSchema, createBashToolHandler, createEnsureConnected } from "./bash.js";
-
-import { createSandboxState, type SandboxState, Mutex } from "./state.js";
+} from './docker.js';
 import {
-  computeContainerName,
-  computeConfigHash,
-  computeSidecarName,
-  getStateDir,
   acquireSessionRef,
-  releaseSessionRef,
-  readStoredConfigHash,
-  deleteConfigHash,
+  computeConfigHash,
+  computeContainerName,
+  computeSidecarName,
   countStaleRefs,
+  deleteConfigHash,
+  getStateDir,
+  readStoredConfigHash,
+  releaseSessionRef,
   resetState,
-} from "./lifecycle.js";
-import { hasNetworkPolicy } from "./network.js";
+} from './lifecycle.js';
+import { hasNetworkPolicy } from './network.js';
+import { Mutex, type SandboxState, createSandboxState } from './state.js';
+import type { ExtensionAPI } from '@mariozechner/pi-coding-agent';
+import { createBashTool, isToolCallEventType } from '@mariozechner/pi-coding-agent';
+import Dockerode from 'dockerode';
+import { existsSync, readdirSync, realpathSync } from 'node:fs';
 
 export interface SandboxExtensionOptions {
   docker?: Dockerode;
@@ -45,19 +50,15 @@ export interface SandboxExtensionOptions {
   pullImageFn?: typeof pullImage;
   stopAndRemoveContainerFn?: typeof stopAndRemoveContainer;
   getContainerStatusFn?: typeof getContainerStatus;
-  ensureNetworkFn?: typeof ensureNetwork;
-  ensureSidecarContainerFn?: typeof ensureSidecarContainer;
-  stopAndRemoveSidecarFn?: typeof stopAndRemoveSidecar;
-  isSidecarHealthyFn?: typeof isSidecarHealthy;
-  watchSidecarEventsFn?: typeof watchSidecarEvents;
-  killContainerFn?: typeof killContainer;
 }
 
-export function createSandboxExtension(options: SandboxExtensionOptions = {}): (pi: ExtensionAPI) => void {
+export function createSandboxExtension(
+  options: SandboxExtensionOptions = {},
+): (pi: ExtensionAPI) => void {
   return function (pi: ExtensionAPI): void {
-    pi.registerFlag("no-sandbox", {
-      description: "Disable the Docker sandbox extension",
-      type: "boolean",
+    pi.registerFlag('no-sandbox', {
+      description: 'Disable the Docker sandbox extension',
+      type: 'boolean',
       default: false,
     });
 
@@ -72,20 +73,14 @@ export function createSandboxExtension(options: SandboxExtensionOptions = {}): (
     const pullImageFn = options.pullImageFn ?? pullImage;
     const stopAndRemoveContainerFn = options.stopAndRemoveContainerFn ?? stopAndRemoveContainer;
     const getContainerStatusFn = options.getContainerStatusFn ?? getContainerStatus;
-    const ensureNetworkFn = options.ensureNetworkFn ?? ensureNetwork;
-    const ensureSidecarContainerFn = options.ensureSidecarContainerFn ?? ensureSidecarContainer;
-    const stopAndRemoveSidecarFn = options.stopAndRemoveSidecarFn ?? stopAndRemoveSidecar;
-    const isSidecarHealthyFn = options.isSidecarHealthyFn ?? isSidecarHealthy;
-    const watchSidecarEventsFn = options.watchSidecarEventsFn ?? watchSidecarEvents;
-    const killContainerFn = options.killContainerFn ?? killContainer;
 
     const state: SandboxState = createSandboxState();
     // In-memory lock for container lifecycle ops in THIS process only —
     // not a cross-session inter-process lock. See Mutex JSDoc for details.
     const lifecycleMutex = new Mutex();
 
-    pi.on("session_shutdown", async (_event, ctx) => {
-      if (pi.getFlag("no-sandbox")) {
+    pi.on('session_shutdown', async (_event, ctx) => {
+      if (pi.getFlag('no-sandbox')) {
         return;
       }
       if (state.workspaceAbsolutePath === undefined) {
@@ -102,7 +97,7 @@ export function createSandboxExtension(options: SandboxExtensionOptions = {}): (
           await stopAndRemoveContainerFn(docker, containerName);
           if (state.config && hasNetworkPolicy(state.config)) {
             const sidecarName = computeSidecarName(state.workspaceAbsolutePath);
-            await stopAndRemoveSidecarFn(docker, sidecarName);
+            await stopAndRemoveSidecar(docker, sidecarName);
           }
           state.container = undefined;
           deleteConfigHash(stateDir);
@@ -112,50 +107,51 @@ export function createSandboxExtension(options: SandboxExtensionOptions = {}): (
       }
     });
 
-    pi.on("session_start", (_event, ctx) => {
-      if (pi.getFlag("no-sandbox")) {
+    pi.on('session_start', (_event, ctx) => {
+      if (pi.getFlag('no-sandbox')) {
         return;
       }
 
       const { config: loadedConfig, warnings } = loadConfigFn(ctx.cwd);
       for (const warning of warnings) {
-        ctx.ui.notify(warning, "warning");
+        ctx.ui.notify(warning, 'warning');
       }
-      const augmentResult = augmentConfigWithPiDir(loadedConfig);
-      if (augmentResult.warning) {
-        ctx.ui.notify(augmentResult.warning, "warning");
+      const { config: augmentedConfig, warning: augmentWarning } =
+        augmentConfigWithPiDir(loadedConfig);
+      if (augmentWarning) {
+        ctx.ui.notify(augmentWarning, 'warning');
       }
-      validateConfig(loadedConfig);
+      validateConfig(augmentedConfig);
 
       const workspacePath = realpathSync(ctx.cwd);
 
-      state.config = loadedConfig;
+      state.config = augmentedConfig;
       state.workspaceAbsolutePath = workspacePath;
       delete state.fatalError;
     });
 
-    pi.on("tool_call", (event, _ctx) => {
-      if (pi.getFlag("no-sandbox")) {
+    pi.on('tool_call', (event, _ctx) => {
+      if (pi.getFlag('no-sandbox')) {
         return undefined;
       }
 
       if (state.config === undefined || state.workspaceAbsolutePath === undefined) {
-        return { block: true, reason: "Sandbox not initialized" };
+        return { block: true, reason: 'Sandbox not initialized' };
       }
 
       let path: string | undefined;
-      if (isToolCallEventType("read", event)) {
+      if (isToolCallEventType('read', event)) {
         path = event.input.path;
-      } else if (isToolCallEventType("write", event)) {
+      } else if (isToolCallEventType('write', event)) {
         path = event.input.path;
-      } else if (isToolCallEventType("edit", event)) {
+      } else if (isToolCallEventType('edit', event)) {
         path = event.input.path;
       } else {
         return undefined;
       }
 
-      if (typeof path !== "string") {
-        return { block: true, reason: "Missing or invalid path argument" };
+      if (typeof path !== 'string') {
+        return { block: true, reason: 'Missing or invalid path argument' };
       }
 
       const normalized = resolvePath(path, state.workspaceAbsolutePath);
@@ -166,25 +162,30 @@ export function createSandboxExtension(options: SandboxExtensionOptions = {}): (
       } catch (err) {
         if (isNodeError(err)) {
           switch (err.code) {
-            case "ENOENT":
+            case 'ENOENT':
               return { block: true, reason: `Path outside workspace: ${path}` };
-            case "EACCES":
+            case 'EACCES':
               return { block: true, reason: `Permission denied resolving path: ${path}` };
-            case "ELOOP":
+            case 'ELOOP':
               return { block: true, reason: `Symlink loop detected: ${path}` };
-            case "ENOTDIR":
+            case 'ENOTDIR':
               return { block: true, reason: `Not a directory in path: ${path}` };
           }
         }
         throw err;
       }
 
-      const operation: AccessOperation = event.toolName === "read" ? "read" : "write";
-      const result = evaluateAccess(resolved, operation, state.config.filesystem, state.workspaceAbsolutePath);
+      const operation: AccessOperation = event.toolName === 'read' ? 'read' : 'write';
+      const result = evaluateAccess(
+        resolved,
+        operation,
+        state.config.filesystem,
+        state.workspaceAbsolutePath,
+      );
 
       if (!result.allowed) {
         const reason =
-          result.reason === "outside-workspace"
+          result.reason === 'outside-workspace'
             ? `Path outside workspace: ${path}`
             : `Read-only path: ${path}`;
         return { block: true, reason };
@@ -193,28 +194,31 @@ export function createSandboxExtension(options: SandboxExtensionOptions = {}): (
       return undefined;
     });
 
-    pi.registerCommand("sandbox-status", {
-      description: "Display the current sandbox state for the workspace.",
+    pi.registerCommand('sandbox-status', {
+      description: 'Display the current sandbox state for the workspace.',
       async handler(_args, ctx) {
-        if (pi.getFlag("no-sandbox")) {
-          ctx.ui.notify("Sandbox status: disabled (--no-sandbox is set).", "info");
+        if (pi.getFlag('no-sandbox')) {
+          ctx.ui.notify('Sandbox status: disabled (--no-sandbox is set).', 'info');
           return;
         }
 
-        const workspacePath = state.workspaceAbsolutePath ?? realpathSync(ctx.cwd);
+        const workspacePath = realpathSync(ctx.cwd);
         const containerName = computeContainerName(workspacePath);
         const stateDir = getStateDir(ctx.sessionManager.getSessionDir());
 
         let effectiveConfig: SandboxConfig;
         try {
           const { config: loadedConfig } = loadConfigFn(workspacePath);
-          augmentConfigWithPiDir(loadedConfig);
-          effectiveConfig = loadedConfig;
+          const { config: augmentedConfig } = augmentConfigWithPiDir(loadedConfig);
+          effectiveConfig = augmentedConfig;
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
-          ctx.ui.notify(`Failed to load sandbox config: ${msg}. Using in-memory config.`, "warning");
+          ctx.ui.notify(
+            `Failed to load sandbox config: ${msg}. Using in-memory config.`,
+            'warning',
+          );
           effectiveConfig = {
-            image: state.config?.image ?? "unknown",
+            image: state.config?.image ?? 'unknown',
             env: state.config?.env ?? {},
             filesystem: state.config?.filesystem ?? { rw: [], ro: [] },
           };
@@ -226,12 +230,12 @@ export function createSandboxExtension(options: SandboxExtensionOptions = {}): (
         const configHash = computeConfigHash(effectiveConfig);
         const storedHash = readStoredConfigHash(stateDir);
 
-        let containerStatus: "running" | "stopped" | "not found";
+        let containerStatus: 'running' | 'stopped' | 'not found';
         try {
           containerStatus = await getContainerStatusFn(docker, containerName);
         } catch (err) {
           if (err instanceof DockerDaemonUnreachableError) {
-            ctx.ui.notify("Docker daemon unreachable", "error");
+            ctx.ui.notify('Docker daemon unreachable', 'error');
             return;
           }
           throw err;
@@ -241,75 +245,89 @@ export function createSandboxExtension(options: SandboxExtensionOptions = {}): (
         try {
           sessionIds = readdirSync(`${stateDir}/sessions`);
         } catch (err) {
-          if (!(isNodeError(err) && err.code === "ENOENT")) {
+          if (!(isNodeError(err) && err.code === 'ENOENT')) {
             throw err;
           }
         }
 
         let configStaleness: string;
         if (storedHash === undefined) {
-          configStaleness = "unknown";
+          configStaleness = 'unknown';
         } else if (storedHash === configHash) {
-          configStaleness = "current";
+          configStaleness = 'current';
         } else {
           configStaleness = `stale — running container was created with ${storedHash}`;
         }
 
         let networkLines: string;
-        if (effectiveConfig.network === undefined || Object.keys(effectiveConfig.network).length === 0) {
-          networkLines = "Network: none";
+        if (
+          effectiveConfig.network === undefined ||
+          Object.keys(effectiveConfig.network).length === 0
+        ) {
+          networkLines = 'Network: none';
         } else {
           const allow: string[] = [];
-          if (effectiveConfig.network.domains?.length) allow.push(...effectiveConfig.network.domains);
+          if (effectiveConfig.network.domains?.length)
+            allow.push(...effectiveConfig.network.domains);
           if (effectiveConfig.network.cidrs?.length) allow.push(...effectiveConfig.network.cidrs);
           const deny = effectiveConfig.network.denyCidrs ?? [];
-          networkLines = `Network:\n  allow: ${allow.join(", ") || "(none)"}\n  deny: ${deny.join(", ") || "(none)"}`;
+          networkLines = `Network:\n  allow: ${allow.join(', ') || '(none)'}\n  deny: ${deny.join(', ') || '(none)'}`;
         }
 
         const lines = [
-          "Sandbox status:",
+          'Sandbox status:',
           `Workspace: ${workspacePath}`,
           `Container: ${containerName} (${containerStatus})`,
           `Image: ${effectiveConfig.image}`,
           `Config hash: ${configHash} (${configStaleness})`,
-          "Filesystem:",
-          `  rw: ${effectiveConfig.filesystem.rw.join(", ") || "(none)"}`,
-          `  ro: ${effectiveConfig.filesystem.ro.join(", ") || "(none)"}`,
+          'Filesystem:',
+          `  rw: ${effectiveConfig.filesystem.rw.join(', ') || '(none)'}`,
+          `  ro: ${effectiveConfig.filesystem.ro.join(', ') || '(none)'}`,
           networkLines,
-          `Sessions: ${String(sessionIds.length)} active (${sessionIds.slice(0, 10).join(", ")}${sessionIds.length > 10 ? ", ..." : ""})`,
+          `Sessions: ${String(sessionIds.length)} active (${sessionIds.slice(0, 10).join(', ')}${sessionIds.length > 10 ? ', ...' : ''})`,
         ];
 
-        ctx.ui.notify(lines.join("\n"), "info");
+        ctx.ui.notify(lines.join('\n'), 'info');
       },
     });
 
-    pi.registerCommand("sandbox-reset", {
-      description: "Force-stop and remove the workspace sandbox container, clearing all refcount state.",
+    pi.registerCommand('sandbox-reset', {
+      description:
+        'Force-stop and remove the workspace sandbox container, clearing all refcount state.',
       async handler(_args, ctx) {
-        if (pi.getFlag("no-sandbox")) {
-          ctx.ui.notify("No sandbox state found.", "warning");
+        if (pi.getFlag('no-sandbox')) {
+          ctx.ui.notify('No sandbox state found.', 'warning');
           return;
         }
 
-        const workspacePath = state.workspaceAbsolutePath ?? realpathSync(ctx.cwd);
+        const workspacePath = realpathSync(ctx.cwd);
         const containerName = computeContainerName(workspacePath);
         const stateDir = getStateDir(ctx.sessionManager.getSessionDir());
 
-        let hasState = false;
-        try {
-          readdirSync(stateDir);
-          hasState = true;
-        } catch (err) {
-          if (err instanceof Error && "code" in err && (err as NodeJS.ErrnoException).code === "ENOENT") {
-            hasState = false;
-          } else {
-            throw err;
-          }
+        if (!existsSync(stateDir)) {
+          ctx.ui.notify('No sandbox state found.', 'warning');
+          return;
         }
 
-        if (!hasState) {
-          ctx.ui.notify("No sandbox state found.", "warning");
-          return;
+        let effectiveConfig: SandboxConfig;
+        try {
+          const { config: loadedConfig } = loadConfigFn(workspacePath);
+          const { config: augmentedConfig } = augmentConfigWithPiDir(loadedConfig);
+          effectiveConfig = augmentedConfig;
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          ctx.ui.notify(
+            `Failed to load config for reset: ${msg}. Sidecar may not be removed.`,
+            'warning',
+          );
+          effectiveConfig = {
+            image: state.config?.image ?? 'unknown',
+            env: state.config?.env ?? {},
+            filesystem: state.config?.filesystem ?? { rw: [], ro: [] },
+          };
+          if (state.config?.network) {
+            effectiveConfig.network = state.config.network;
+          }
         }
 
         const stale = countStaleRefs(stateDir);
@@ -317,9 +335,9 @@ export function createSandboxExtension(options: SandboxExtensionOptions = {}): (
         const release = await lifecycleMutex.acquire();
         try {
           await stopAndRemoveContainerFn(docker, containerName);
-          if (state.config && hasNetworkPolicy(state.config)) {
+          if (hasNetworkPolicy(effectiveConfig)) {
             const sidecarName = computeSidecarName(workspacePath);
-            await stopAndRemoveSidecarFn(docker, sidecarName);
+            await stopAndRemoveSidecar(docker, sidecarName);
           }
           state.container = undefined;
           delete state.fatalError;
@@ -330,32 +348,32 @@ export function createSandboxExtension(options: SandboxExtensionOptions = {}): (
           release();
         }
 
-        ctx.ui.notify(`Reset sandbox container. Removed ${String(stale)} stale session reference(s).`, "info");
+        ctx.ui.notify(
+          `Reset sandbox container. Removed ${String(stale)} stale session reference(s).`,
+          'info',
+        );
       },
     });
 
     const ensureConnected = createEnsureConnected({
       state,
       lifecycleMutex,
-      startDeps: { docker, doesImageExistFn, ensureContainerFn, pullImageFn, ensureNetworkFn, ensureSidecarContainerFn },
+      startDeps: { docker, doesImageExistFn, ensureContainerFn, pullImageFn },
       acquireSessionRef,
     });
 
     pi.registerTool({
-      name: "bash",
-      label: "bash (sandboxed)",
-      description: "Execute a command inside the sandbox container.",
+      name: 'bash',
+      label: 'bash (sandboxed)',
+      description: 'Execute a command inside the sandbox container.',
       parameters: bashSchema,
       execute: createBashToolHandler({
-        getNoSandbox: () => pi.getFlag("no-sandbox") as boolean,
+        getNoSandbox: () => pi.getFlag('no-sandbox') as boolean,
         localBash,
         state,
         execInContainerFn,
         ensureConnected,
         docker,
-        isSidecarHealthyFn,
-        watchSidecarEventsFn,
-        killContainerFn,
       }),
     });
   };

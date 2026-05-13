@@ -1,25 +1,22 @@
-import type Dockerode from "dockerode";
-import { writeFileSync } from "node:fs";
-import type { SandboxState } from "./state.js";
-import type { SandboxConfig } from "./config.js";
+import type { SandboxConfig } from './config.js';
+import { ensureContainer, ensureNetwork, ensureSidecarContainer, pullImage } from './docker.js';
 import {
   computeConfigHash,
+  computeNetworkName,
+  computeSidecarName,
   readStoredConfigHash,
   writeConfigHash,
-  computeSidecarName,
-  computeNetworkName,
-} from "./lifecycle.js";
-import {
-  ensureContainer,
-  pullImage,
-  ensureNetwork,
-  ensureSidecarContainer,
-} from "./docker.js";
-import { hasNetworkPolicy, generateSingBoxConfig } from "./network.js";
+} from './lifecycle.js';
+import { generateSingBoxConfig, hasNetworkPolicy } from './network.js';
+import type { SandboxState } from './state.js';
+import type Dockerode from 'dockerode';
+import { writeFileSync } from 'node:fs';
+
+export const DEFAULT_SIDECAR_IMAGE = 'ghcr.io/sagernet/sing-box:v1.12.0';
 
 export type StartSandboxResult =
-  | { kind: "ready"; configStaleness: boolean }
-  | { kind: "pulling"; done: Promise<{ kind: "ready" } | { kind: "error"; message: string }> };
+  | { kind: 'ready'; configStaleness: boolean }
+  | { kind: 'pulling'; done: Promise<{ kind: 'ready' } | { kind: 'error'; message: string }> };
 
 export interface StartSandboxDependencies {
   docker: Dockerode;
@@ -43,17 +40,19 @@ export async function startSandboxContainer(
 
   const imagesToCheck = [cfg.image];
   if (activeNetwork) {
-    imagesToCheck.push(cfg.sidecarImage ?? "ghcr.io/sagernet/sing-box:v1.12.0");
+    imagesToCheck.push(cfg.sidecarImage ?? DEFAULT_SIDECAR_IMAGE);
   }
 
-  const imageExists = await Promise.all(imagesToCheck.map((img) => deps.doesImageExistFn(deps.docker, img)));
+  const imageExists = await Promise.all(
+    imagesToCheck.map((img) => deps.doesImageExistFn(deps.docker, img)),
+  );
   const allImagesExist = imageExists.every(Boolean);
 
   if (!allImagesExist) {
     state.pull.isPulling = true;
     state.pull.error = undefined;
 
-    const done = (async (): Promise<{ kind: "ready" } | { kind: "error"; message: string }> => {
+    const done = (async (): Promise<{ kind: 'ready' } | { kind: 'error'; message: string }> => {
       try {
         for (const img of imagesToCheck) {
           const exists = await deps.doesImageExistFn(deps.docker, img);
@@ -62,23 +61,35 @@ export async function startSandboxContainer(
           }
         }
 
-        const { container: runningContainer } = await createContainers(deps, cfg, workspacePath, containerName, stateDir);
+        const { container: runningContainer } = await createContainers(
+          deps,
+          cfg,
+          workspacePath,
+          containerName,
+          stateDir,
+        );
         writeConfigHash(stateDir, configHash);
         state.container = runningContainer;
         state.pull.isPulling = false;
-        return { kind: "ready" as const };
+        return { kind: 'ready' as const };
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         state.pull.error = msg;
         state.pull.isPulling = false;
-        return { kind: "error" as const, message: msg };
+        return { kind: 'error' as const, message: msg };
       }
     })();
 
-    return { kind: "pulling", done };
+    return { kind: 'pulling', done };
   }
 
-  const { container: runningContainer, created } = await createContainers(deps, cfg, workspacePath, containerName, stateDir);
+  const { container: runningContainer, created } = await createContainers(
+    deps,
+    cfg,
+    workspacePath,
+    containerName,
+    stateDir,
+  );
 
   let configStaleness = false;
   if (created) {
@@ -92,7 +103,7 @@ export async function startSandboxContainer(
   }
 
   state.container = runningContainer;
-  return { kind: "ready", configStaleness };
+  return { kind: 'ready', configStaleness };
 }
 
 async function createContainers(
@@ -110,7 +121,7 @@ async function createContainers(
 
   const sidecarName = computeSidecarName(workspacePath);
   const networkName = computeNetworkName(workspacePath);
-  const sidecarImage = cfg.sidecarImage ?? "ghcr.io/sagernet/sing-box:v1.12.0";
+  const sidecarImage = cfg.sidecarImage ?? DEFAULT_SIDECAR_IMAGE;
   const configPath = `${stateDir}/sing-box-config.json`;
 
   const ensureNetworkFn = deps.ensureNetworkFn ?? ensureNetwork;
@@ -120,12 +131,18 @@ async function createContainers(
 
   const networkConfig = cfg.network;
   if (!networkConfig) {
-    throw new Error("Network config missing despite hasNetworkPolicy being true");
+    throw new Error('Network config missing despite hasNetworkPolicy being true');
   }
   const singBoxConfig = generateSingBoxConfig(networkConfig);
   writeFileSync(configPath, JSON.stringify(singBoxConfig, null, 2));
 
   await ensureSidecarFn(deps.docker, sidecarImage, sidecarName, networkName, configPath);
 
-  return deps.ensureContainerFn(deps.docker, cfg, workspacePath, containerName, `container:${sidecarName}`);
+  return deps.ensureContainerFn(
+    deps.docker,
+    cfg,
+    workspacePath,
+    containerName,
+    `container:${sidecarName}`,
+  );
 }

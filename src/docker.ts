@@ -1,21 +1,15 @@
-import Dockerode from "dockerode";
-import { mkdirSync } from "node:fs";
-import { kill } from "node:process";
-import { PassThrough } from "node:stream";
-import { truncateTail, DEFAULT_MAX_LINES, DEFAULT_MAX_BYTES } from "@mariozechner/pi-coding-agent";
-import type { TruncationResult } from "@mariozechner/pi-coding-agent";
-import { isNodeError } from "./acl.js";
-import type { FilesystemConfig, SandboxConfig } from "./config.js";
+import { isNodeError } from './acl.js';
+import type { FilesystemConfig, SandboxConfig } from './config.js';
+import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, truncateTail } from '@mariozechner/pi-coding-agent';
+import type { TruncationResult } from '@mariozechner/pi-coding-agent';
+import Dockerode from 'dockerode';
+import { mkdirSync } from 'node:fs';
+import { kill } from 'node:process';
+import { PassThrough } from 'node:stream';
 
 export class DockerDaemonUnreachableError extends Error {
   constructor() {
-    super("Docker daemon unreachable");
-  }
-}
-
-export class ContainerNotRunningError extends Error {
-  constructor() {
-    super("Sandbox container not running");
+    super('Docker daemon unreachable');
   }
 }
 
@@ -26,7 +20,7 @@ export interface ExecInContainerOptions {
   signal?: AbortSignal | undefined;
   onUpdate?:
     | ((payload: {
-        content: { type: "text"; text: string }[];
+        content: { type: 'text'; text: string }[];
         details: { truncation?: TruncationResult | undefined };
       }) => void)
     | undefined;
@@ -59,14 +53,14 @@ interface DockerModem {
  *
  * Ignores ESRCH (process already gone) and Pid 0 (process never started).
  */
-async function killExec(exec: Dockerode.Exec, sig: NodeJS.Signals = "SIGKILL"): Promise<void> {
+async function killExec(exec: Dockerode.Exec, sig: NodeJS.Signals = 'SIGKILL'): Promise<void> {
   const info = await exec.inspect();
   const pid = info.Pid;
   if (pid === 0) return;
   try {
     kill(pid, sig);
   } catch (err) {
-    if (isNodeError(err) && err.code === "ESRCH") {
+    if (isNodeError(err) && err.code === 'ESRCH') {
       return;
     }
     throw err;
@@ -77,9 +71,7 @@ export function buildBindMounts(
   filesystem: FilesystemConfig,
   workspaceAbsolutePath: string,
 ): string[] {
-  const mounts: string[] = [
-    `${workspaceAbsolutePath}:${workspaceAbsolutePath}:rw`,
-  ];
+  const mounts: string[] = [`${workspaceAbsolutePath}:${workspaceAbsolutePath}:rw`];
   for (const prefix of filesystem.ro) {
     mounts.push(`${prefix}:${prefix}:ro`);
   }
@@ -89,10 +81,7 @@ export function buildBindMounts(
   return mounts;
 }
 
-export function buildEnvVars(
-  env: Record<string, string>,
-  hostHomeDirectory: string,
-): string[] {
+export function buildEnvVars(env: Record<string, string>, hostHomeDirectory: string): string[] {
   const vars: Record<string, string> = { HOME: hostHomeDirectory, ...env };
   return Object.entries(vars).map(([k, v]) => `${k}=${v}`);
 }
@@ -104,7 +93,11 @@ export function createMissingDirs(paths: string[]): void {
 }
 
 function hasStatusCode(err: unknown, statusCode: number): boolean {
-  return err instanceof Error && "statusCode" in err && (err as { statusCode: number }).statusCode === statusCode;
+  return (
+    err instanceof Error &&
+    'statusCode' in err &&
+    (err as { statusCode: number }).statusCode === statusCode
+  );
 }
 
 export function isDockerNotFound(err: unknown): boolean {
@@ -115,14 +108,22 @@ function isDockerConflict(err: unknown): boolean {
   return hasStatusCode(err, 409);
 }
 
+function isDockerNotModified(err: unknown): boolean {
+  return hasStatusCode(err, 304);
+}
+
+function isAlreadyStopped(err: unknown): boolean {
+  return err instanceof Error && err.message.toLowerCase().includes('already stopped');
+}
+
 function isConnectionError(err: unknown): boolean {
   if (!(err instanceof Error)) return false;
   const msg = err.message.toLowerCase();
   return (
-    msg.includes("econnrefused") ||
-    msg.includes("enoent") ||
-    msg.includes("connect") ||
-    msg.includes("socket")
+    msg.includes('econnrefused') ||
+    msg.includes('enoent') ||
+    msg.includes('connect') ||
+    msg.includes('socket')
   );
 }
 
@@ -158,14 +159,14 @@ export async function ensureContainer(
     const newContainer = await docker.createContainer({
       name: containerName,
       Image: config.image,
-      Cmd: ["sleep", "infinity"],
+      Cmd: ['sleep', 'infinity'],
       HostConfig: {
-        NetworkMode: networkMode ?? "none",
-        CapDrop: ["ALL"],
-        SecurityOpt: ["no-new-privileges:true"],
+        NetworkMode: networkMode ?? 'none',
+        CapDrop: ['ALL'],
+        SecurityOpt: ['no-new-privileges:true'],
         Binds: buildBindMounts(config.filesystem, workspaceAbsolutePath),
       },
-      Env: buildEnvVars(config.env, process.env.HOME ?? "/root"),
+      Env: buildEnvVars(config.env, process.env.HOME ?? '/root'),
       WorkingDir: workspaceAbsolutePath,
     });
     await newContainer.start();
@@ -188,14 +189,14 @@ export async function ensureContainer(
 export async function getContainerStatus(
   docker: Dockerode,
   containerName: string,
-): Promise<"running" | "stopped" | "not found"> {
+): Promise<'running' | 'stopped' | 'not found'> {
   const container = docker.getContainer(containerName);
   try {
     const info = await container.inspect();
-    return info.State.Running ? "running" : "stopped";
+    return info.State.Running ? 'running' : 'stopped';
   } catch (err) {
     if (isDockerNotFound(err)) {
-      return "not found";
+      return 'not found';
     }
     rethrowDockerDaemonError(err);
     throw err;
@@ -214,8 +215,12 @@ export async function stopAndRemoveContainer(
     if (isDockerNotFound(err)) {
       return;
     }
-    rethrowDockerDaemonError(err);
-    // Other stop errors (e.g., already stopped) are benign.
+    if (isDockerNotModified(err) || isAlreadyStopped(err)) {
+      // Already stopped — benign.
+    } else {
+      rethrowDockerDaemonError(err);
+      throw err;
+    }
   }
 
   try {
@@ -237,8 +242,12 @@ export async function killContainer(docker: Dockerode, containerName: string): P
     if (isDockerNotFound(err)) {
       return;
     }
+    if (isDockerConflict(err)) {
+      // Container already stopped — benign.
+      return;
+    }
     rethrowDockerDaemonError(err);
-    // Ignore other errors (e.g., container already stopped)
+    throw err;
   }
 }
 
@@ -252,7 +261,7 @@ export async function ensureNetwork(docker: Dockerode, networkName: string): Pro
       throw err;
     }
     try {
-      await docker.createNetwork({ Name: networkName, Driver: "bridge" });
+      await docker.createNetwork({ Name: networkName, Driver: 'bridge' });
     } catch (createErr) {
       if (!isDockerConflict(createErr)) {
         rethrowDockerDaemonError(createErr);
@@ -287,15 +296,17 @@ export async function ensureSidecarContainer(
     const newContainer = await docker.createContainer({
       name: sidecarName,
       Image: sidecarImage,
-      Cmd: ["run", "-c", "/etc/sing-box/config.json"],
+      Cmd: ['run', '-c', '/etc/sing-box/config.json'],
       HostConfig: {
         NetworkMode: networkName,
-        CapAdd: ["NET_ADMIN"],
-        Devices: [{ PathOnHost: "/dev/net/tun", PathInContainer: "/dev/net/tun", CgroupPermissions: "rwm" }],
+        CapAdd: ['NET_ADMIN'],
+        Devices: [
+          { PathOnHost: '/dev/net/tun', PathInContainer: '/dev/net/tun', CgroupPermissions: 'rwm' },
+        ],
         Binds: [`${configPath}:/etc/sing-box/config.json:ro`],
-        SecurityOpt: ["no-new-privileges:true"],
+        SecurityOpt: ['no-new-privileges:true'],
         ReadonlyRootfs: true,
-        Tmpfs: { "/tmp": "rw,noexec,nosuid,size=10m" },
+        Tmpfs: { '/tmp': 'rw,noexec,nosuid,size=10m' },
       },
     });
     await newContainer.start();
@@ -341,7 +352,7 @@ export async function watchSidecarEvents(
     const opts = {
       filters: JSON.stringify({
         container: [sidecarName],
-        event: ["die", "stop", "kill", "oom"],
+        event: ['die', 'stop', 'kill', 'oom'],
       }),
     };
 
@@ -351,11 +362,11 @@ export async function watchSidecarEvents(
         return;
       }
       if (!stream) {
-        reject(new Error("No event stream"));
+        reject(new Error('No event stream'));
         return;
       }
 
-      const readableStream = stream as unknown as import("stream").Readable;
+      const readableStream = stream as unknown as import('stream').Readable;
 
       let resolved = false;
       const cleanup = (): void => {
@@ -364,15 +375,15 @@ export async function watchSidecarEvents(
         readableStream.destroy();
       };
 
-      readableStream.on("data", () => {
+      readableStream.on('data', () => {
         cleanup();
         resolve();
       });
-      readableStream.on("end", () => {
+      readableStream.on('end', () => {
         cleanup();
         resolve();
       });
-      readableStream.on("error", (e) => {
+      readableStream.on('error', (_err) => {
         cleanup();
         // Fail-closed: stream errors mean we lost visibility into sidecar state.
         // Treat them the same as a sidecar death event (caller will kill the app).
@@ -385,14 +396,14 @@ export async function watchSidecarEvents(
           cleanup();
           resolve();
         };
-        signal.addEventListener("abort", onAbort, { once: true });
+        signal.addEventListener('abort', onAbort, { once: true });
       }
     });
   });
 }
 
 function abortedResult(): ExecInContainerResult {
-  return { stdout: "", stderr: "", exitCode: null, timedOut: false, aborted: true };
+  return { stdout: '', stderr: '', exitCode: null, timedOut: false, aborted: true };
 }
 
 export async function execInContainer(
@@ -406,7 +417,7 @@ export async function execInContainer(
   }
 
   const exec = await container.exec({
-    Cmd: ["sh", "-c", command],
+    Cmd: ['sh', '-c', command],
     WorkingDir: cwd,
     AttachStdout: true,
     AttachStderr: true,
@@ -419,7 +430,7 @@ export async function execInContainer(
   const stream = await exec.start({ hijack: true, stdin: false });
 
   if (signal?.aborted) {
-    await killExec(exec, "SIGKILL");
+    await killExec(exec, 'SIGKILL');
     stream.destroy();
     return abortedResult();
   }
@@ -445,24 +456,24 @@ export async function execInContainer(
   const emitUpdate = (): void => {
     if (!onUpdate) return;
     const fullBuffer = Buffer.concat(rollingChunks);
-    const fullText = fullBuffer.toString("utf-8");
+    const fullText = fullBuffer.toString('utf-8');
     const truncation = truncateTail(fullText, {
       maxLines: DEFAULT_MAX_LINES,
       maxBytes: DEFAULT_MAX_BYTES,
     });
     onUpdate({
-      content: [{ type: "text", text: truncation.content || "" }],
+      content: [{ type: 'text', text: truncation.content || '' }],
       details: truncation.truncated ? { truncation } : {},
     });
   };
 
-  stdout.on("data", (chunk: Buffer): void => {
+  stdout.on('data', (chunk: Buffer): void => {
     stdoutChunks.push(chunk);
     pushToRollingBuffer(chunk);
     emitUpdate();
   });
 
-  stderr.on("data", (chunk: Buffer): void => {
+  stderr.on('data', (chunk: Buffer): void => {
     stderrChunks.push(chunk);
     pushToRollingBuffer(chunk);
     emitUpdate();
@@ -477,7 +488,7 @@ export async function execInContainer(
   if (timeout !== undefined && timeout > 0) {
     timer = setTimeout(() => {
       state.timedOut = true;
-      void killExec(exec, "SIGKILL");
+      void killExec(exec, 'SIGKILL');
       stream.destroy();
     }, timeout * 1000);
   }
@@ -486,10 +497,10 @@ export async function execInContainer(
   if (signal) {
     abortHandler = (): void => {
       state.aborted = true;
-      void killExec(exec, "SIGKILL");
+      void killExec(exec, 'SIGKILL');
       stream.destroy();
     };
-    signal.addEventListener("abort", abortHandler);
+    signal.addEventListener('abort', abortHandler);
   }
 
   await new Promise<void>((resolve, reject) => {
@@ -510,20 +521,20 @@ export async function execInContainer(
       }
     };
     const cleanup = (): void => {
-      stream.off("end", onEnd);
-      stream.off("close", onClose);
-      stream.off("error", onError);
+      stream.off('end', onEnd);
+      stream.off('close', onClose);
+      stream.off('error', onError);
     };
-    stream.on("end", onEnd);
-    stream.on("close", onClose);
-    stream.on("error", onError);
+    stream.on('end', onEnd);
+    stream.on('close', onClose);
+    stream.on('error', onError);
   });
 
   if (timer !== undefined) {
     clearTimeout(timer);
   }
   if (abortHandler !== undefined && signal) {
-    signal.removeEventListener("abort", abortHandler);
+    signal.removeEventListener('abort', abortHandler);
   }
 
   let exitCode: number | null = null;
@@ -540,8 +551,8 @@ export async function execInContainer(
     }
   }
 
-  const resultStdout = Buffer.concat(stdoutChunks).toString("utf-8");
-  const resultStderr = Buffer.concat(stderrChunks).toString("utf-8");
+  const resultStdout = Buffer.concat(stdoutChunks).toString('utf-8');
+  const resultStderr = Buffer.concat(stderrChunks).toString('utf-8');
 
   return {
     stdout: resultStdout,
@@ -552,10 +563,7 @@ export async function execInContainer(
   };
 }
 
-export async function doesImageExist(
-  docker: Dockerode,
-  image: string,
-): Promise<boolean> {
+export async function doesImageExist(docker: Dockerode, image: string): Promise<boolean> {
   try {
     const img = docker.getImage(image);
     await img.inspect();
@@ -573,29 +581,30 @@ interface PullProgress {
   error?: string;
 }
 
-export async function pullImage(
-  docker: Dockerode,
-  image: string,
-): Promise<void> {
+export async function pullImage(docker: Dockerode, image: string): Promise<void> {
   return new Promise((resolve, reject) => {
-    (docker as unknown as {
-      pull: (
-        repoTag: string,
-        callback: (err: Error | null, stream: NodeJS.ReadableStream) => void,
-      ) => void;
-    }).pull(image, (err, stream) => {
+    (
+      docker as unknown as {
+        pull: (
+          repoTag: string,
+          callback: (err: Error | null, stream: NodeJS.ReadableStream) => void,
+        ) => void;
+      }
+    ).pull(image, (err, stream) => {
       if (err) {
         reject(err);
         return;
       }
-      (docker as unknown as {
-        modem: {
-          followProgress: (
-            stream: NodeJS.ReadableStream,
-            callback: (err: Error | null, output: PullProgress[]) => void,
-          ) => void;
-        };
-      }).modem.followProgress(stream, (err, output) => {
+      (
+        docker as unknown as {
+          modem: {
+            followProgress: (
+              stream: NodeJS.ReadableStream,
+              callback: (err: Error | null, output: PullProgress[]) => void,
+            ) => void;
+          };
+        }
+      ).modem.followProgress(stream, (err, output) => {
         if (err) {
           reject(err);
           return;

@@ -4,9 +4,10 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "format": "prettier --write src/**/*.ts tests/**/*.ts",
     "test": "tsx --test tests/**/*.test.ts",
     "lint": "eslint src/**/*.ts tests/**/*.ts && tsc --noEmit",
-    "check": "npm run lint && npm run test"
+    "check": "npm run format && npm run lint && npm run test"
   },
   "pi": {
     "extensions": [
@@ -20,9 +21,12 @@
     "@eslint/js": "^9.0.0",
     "@mariozechner/pi-coding-agent": "^0.73.1",
     "@sinclair/typebox": "^0.34.49",
+    "@trivago/prettier-plugin-sort-imports": "^6.0.2",
     "@types/dockerode": "^3.3.32",
     "@types/node": "^22.0.0",
     "eslint": "^9.0.0",
+    "eslint-config-prettier": "^10.1.8",
+    "prettier": "^3.8.3",
     "tsx": "^4.0.0",
     "typescript": "^5.5.0",
     "typescript-eslint": "^8.0.0"

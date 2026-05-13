@@ -1,7 +1,9 @@
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
-import { expandTilde } from "./path.js";
-import { extractNetwork, type NetworkConfig, checkBuiltInDenyOverlaps } from "./network.js";
+import { isNodeError } from './acl.js';
+import { type NetworkConfig, checkBuiltInDenyOverlaps, extractNetwork } from './network.js';
+import { expandTilde } from './path.js';
+import { readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 
 export interface FilesystemConfig {
   rw: string[];
@@ -16,11 +18,11 @@ export interface SandboxConfig {
   network?: NetworkConfig;
 }
 
-const TOP_LEVEL_KEYS = new Set(["image", "env", "filesystem", "network", "sidecarImage"]);
-const FILESYSTEM_KEYS = new Set(["rw", "ro"]);
+const TOP_LEVEL_KEYS = new Set(['image', 'env', 'filesystem', 'network', 'sidecarImage']);
+const FILESYSTEM_KEYS = new Set(['rw', 'ro']);
 
 function isObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function collectUnknownKeyWarnings(
@@ -38,7 +40,7 @@ function collectUnknownKeyWarnings(
 }
 
 function readJsonFile(filePath: string): unknown {
-  const content = readFileSync(filePath, "utf-8");
+  const content = readFileSync(filePath, 'utf-8');
   return JSON.parse(content) as unknown;
 }
 
@@ -46,7 +48,7 @@ function loadOptionalConfig(filePath: string): { data: unknown; warnings: string
   try {
     return { data: readJsonFile(filePath), warnings: [] };
   } catch (err) {
-    if (err instanceof Error && "code" in err && err.code === "ENOENT") {
+    if (isNodeError(err) && err.code === 'ENOENT') {
       return { data: {}, warnings: [] };
     }
     if (err instanceof SyntaxError) {
@@ -63,7 +65,7 @@ function loadRequiredConfig(filePath: string): unknown {
   try {
     return readJsonFile(filePath);
   } catch (err) {
-    if (err instanceof Error && "code" in err && err.code === "ENOENT") {
+    if (isNodeError(err) && err.code === 'ENOENT') {
       throw new Error(`Global sandbox config missing: ${filePath}`);
     }
     if (err instanceof SyntaxError) {
@@ -79,7 +81,7 @@ function extractStringMap(value: unknown, context: string): Record<string, strin
   }
   const result: Record<string, string> = {};
   for (const [k, v] of Object.entries(value)) {
-    if (typeof v !== "string") {
+    if (typeof v !== 'string') {
       throw new Error(`env value for "${k}" in ${context} must be a string, got ${typeof v}`);
     }
     result[k] = v;
@@ -87,7 +89,10 @@ function extractStringMap(value: unknown, context: string): Record<string, strin
   return result;
 }
 
-function extractFilesystem(value: unknown, filePath: string): { config: FilesystemConfig; warnings: string[] } {
+function extractFilesystem(
+  value: unknown,
+  filePath: string,
+): { config: FilesystemConfig; warnings: string[] } {
   if (!isObject(value)) {
     return { config: { rw: [], ro: [] }, warnings: [] };
   }
@@ -103,7 +108,7 @@ function extractStringArray(value: unknown): string[] {
   if (!Array.isArray(value)) {
     return [];
   }
-  return value.filter((item): item is string => typeof item === "string");
+  return value.filter((item): item is string => typeof item === 'string');
 }
 
 function mergeStringMaps(
@@ -112,7 +117,7 @@ function mergeStringMaps(
 ): Record<string, string> {
   let result: Record<string, string> = { ...global };
   for (const [key, value] of Object.entries(workspace)) {
-    if (value === "") {
+    if (value === '') {
       const { [key]: _removed, ...rest } = result;
       result = rest;
     } else {
@@ -123,28 +128,29 @@ function mergeStringMaps(
 }
 
 function mergeStringLists(global: string[], workspace: string[]): string[] {
-  if (workspace.length > 0 && workspace[0] === "") {
+  if (workspace.length > 0 && workspace[0] === '') {
     return workspace.slice(1);
   }
   return [...global, ...workspace];
 }
 
 function validatePrefix(prefix: string, context: string): void {
-  if (!prefix.startsWith("/")) {
+  if (!prefix.startsWith('/')) {
     throw new Error(`${context} prefix must be absolute: "${prefix}"`);
   }
-  if (prefix.includes("*") || prefix.includes("?")) {
+  if (prefix.includes('*') || prefix.includes('?')) {
     throw new Error(`${context} prefix must not contain wildcards: "${prefix}"`);
   }
-  if (prefix.includes("..")) {
+  if (prefix.includes('..')) {
     throw new Error(`${context} prefix must not contain "..": "${prefix}"`);
   }
-  if (prefix !== "/" && prefix.endsWith("/")) {
+  if (prefix !== '/' && prefix.endsWith('/')) {
     throw new Error(`${context} prefix must not end with "/": "${prefix}"`);
   }
 }
 
 export interface AugmentResult {
+  config: SandboxConfig;
   augmented: boolean;
   warning?: string;
 }
@@ -153,73 +159,90 @@ export function augmentConfigWithPiDir(config: SandboxConfig): AugmentResult {
   const piDir = process.env.PI_PACKAGE_DIR;
   if (!piDir || piDir.trim().length === 0) {
     return {
+      config,
       augmented: false,
       warning:
-        "PI_PACKAGE_DIR is not set; the model will not be able to read pi documentation inside the sandbox.",
+        'PI_PACKAGE_DIR is not set; the model will not be able to read pi documentation inside the sandbox.',
     };
   }
   if (config.filesystem.ro.includes(piDir)) {
-    return { augmented: false };
+    return { config, augmented: false };
   }
-  config.filesystem.ro.push(piDir);
-  return { augmented: true };
+  return {
+    config: {
+      ...config,
+      filesystem: {
+        ...config.filesystem,
+        ro: [...config.filesystem.ro, piDir],
+      },
+    },
+    augmented: true,
+  };
 }
 
 export function validateConfig(config: SandboxConfig): void {
-  if (typeof config.image !== "string" || config.image.length === 0) {
-    throw new Error('Merged sandbox config must have a non-empty "image" string');
+  if (typeof config.image !== 'string' || config.image.length === 0) {
+    throw new Error(`Merged sandbox config must have a non-empty "image" string`);
   }
 
-  if (config.sidecarImage !== undefined && (typeof config.sidecarImage !== "string" || config.sidecarImage.length === 0)) {
-    throw new Error('sidecarImage must be a non-empty string');
+  if (
+    config.sidecarImage !== undefined &&
+    (typeof config.sidecarImage !== 'string' || config.sidecarImage.length === 0)
+  ) {
+    throw new Error(`sidecarImage must be a non-empty string`);
   }
 
   for (const [key, value] of Object.entries(config.env)) {
-    if (typeof value !== "string") {
+    if (typeof value !== 'string') {
       throw new Error(`env value for "${key}" must be a string, got ${typeof value}`);
     }
   }
 
   for (const prefix of config.filesystem.rw) {
-    validatePrefix(prefix, "filesystem.rw");
+    validatePrefix(prefix, 'filesystem.rw');
   }
   for (const prefix of config.filesystem.ro) {
-    validatePrefix(prefix, "filesystem.ro");
+    validatePrefix(prefix, 'filesystem.ro');
   }
 }
 
-export function mergeConfigs(globalRaw: unknown, workspaceRaw: unknown): { config: SandboxConfig; warnings: string[] } {
+export function mergeConfigs(
+  globalRaw: unknown,
+  workspaceRaw: unknown,
+): { config: SandboxConfig; warnings: string[] } {
   const globalObj = isObject(globalRaw) ? globalRaw : {};
   const workspaceObj = isObject(workspaceRaw) ? workspaceRaw : {};
 
   const warnings: string[] = [];
-  warnings.push(...collectUnknownKeyWarnings(globalObj, TOP_LEVEL_KEYS, "global config"));
-  warnings.push(...collectUnknownKeyWarnings(workspaceObj, TOP_LEVEL_KEYS, "workspace config"));
+  warnings.push(...collectUnknownKeyWarnings(globalObj, TOP_LEVEL_KEYS, 'global config'));
+  warnings.push(...collectUnknownKeyWarnings(workspaceObj, TOP_LEVEL_KEYS, 'workspace config'));
 
-  const globalEnv = extractStringMap(globalObj.env, "global config");
-  const workspaceEnv = extractStringMap(workspaceObj.env, "workspace config");
+  const globalEnv = extractStringMap(globalObj.env, 'global config');
+  const workspaceEnv = extractStringMap(workspaceObj.env, 'workspace config');
 
-  const globalFs = extractFilesystem(globalObj.filesystem, "global config#filesystem");
-  const workspaceFs = extractFilesystem(workspaceObj.filesystem, "workspace config#filesystem");
+  const globalFs = extractFilesystem(globalObj.filesystem, 'global config#filesystem');
+  const workspaceFs = extractFilesystem(workspaceObj.filesystem, 'workspace config#filesystem');
   warnings.push(...globalFs.warnings, ...workspaceFs.warnings);
 
-  const globalNetwork = extractNetwork(globalObj.network, "global config");
-  const workspaceNetwork = extractNetwork(workspaceObj.network, "workspace config");
+  const globalNetwork = extractNetwork(globalObj.network, 'global config');
+  const workspaceNetwork = extractNetwork(workspaceObj.network, 'workspace config');
   warnings.push(...globalNetwork.warnings, ...workspaceNetwork.warnings);
 
   const image =
-    typeof workspaceObj.image === "string" && workspaceObj.image.length > 0
+    typeof workspaceObj.image === 'string' && workspaceObj.image.length > 0
       ? workspaceObj.image
-      : typeof globalObj.image === "string"
+      : typeof globalObj.image === 'string'
         ? globalObj.image
-        : "";
+        : '';
 
   if (workspaceObj.sidecarImage !== undefined) {
-    warnings.push("[pi-sandbox] sidecarImage in workspace config is ignored; set it in global config only");
+    warnings.push(
+      '[pi-sandbox] sidecarImage in workspace config is ignored; set it in global config only',
+    );
   }
 
   const sidecarImage =
-    typeof globalObj.sidecarImage === "string" && globalObj.sidecarImage.length > 0
+    typeof globalObj.sidecarImage === 'string' && globalObj.sidecarImage.length > 0
       ? globalObj.sidecarImage
       : undefined;
 
@@ -254,15 +277,12 @@ export function mergeConfigs(globalRaw: unknown, workspaceRaw: unknown): { confi
 }
 
 export function loadConfig(workspacePath: string): { config: SandboxConfig; warnings: string[] } {
-  const home = process.env.HOME;
-  if (!home) {
-    throw new Error("HOME environment variable is not set");
-  }
-  const globalPath = join(home, ".pi", "sandbox.json");
-  const workspaceConfigPath = join(workspacePath, "sandbox.json");
+  const globalPath = join(homedir(), '.pi', 'sandbox.json');
+  const workspaceConfigPath = join(workspacePath, 'sandbox.json');
 
   const globalRaw = loadRequiredConfig(globalPath);
-  const { data: workspaceRaw, warnings: workspaceWarnings } = loadOptionalConfig(workspaceConfigPath);
+  const { data: workspaceRaw, warnings: workspaceWarnings } =
+    loadOptionalConfig(workspaceConfigPath);
 
   const { config: merged, warnings: mergeWarnings } = mergeConfigs(globalRaw, workspaceRaw);
   validateConfig(merged);

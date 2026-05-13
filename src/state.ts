@@ -1,5 +1,5 @@
-import type Dockerode from "dockerode";
-import type { SandboxConfig } from "./config.js";
+import type { SandboxConfig } from './config.js';
+import type Dockerode from 'dockerode';
 
 export interface SandboxState {
   workspaceAbsolutePath: string | undefined;
@@ -42,10 +42,13 @@ export class Mutex {
       release = resolve;
     });
     const prev = this.promise;
-    this.promise = prev.then(() => newPromise, () => newPromise);
+    this.promise = prev.then(
+      () => newPromise,
+      () => newPromise,
+    );
     await prev;
     if (release === undefined) {
-      throw new Error("Mutex release callback was not initialized");
+      throw new Error('Mutex release callback was not initialized');
     }
     return release;
   }

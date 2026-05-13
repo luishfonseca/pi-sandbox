@@ -39,7 +39,15 @@ This is `pi-sandbox`, a Pi extension. See `spec/DESIGN.md` for the full behavior
 - **Comments explain why, not what.** Delete comments that narrate syntax.
 - **Observability and defense.** Log at major branches and state changes with correlation IDs. Sanitize and validate all external inputs.
 
-## Lessons Learned
+## Conventions
 
-- **Use `ctx.ui.notify()` instead of `console.*` for user-facing messages.**
-  Pi is a TUI application; raw `console.log` / `console.warn` / `console.error` bypass the terminal UI layer and can corrupt the screen, produce invisible output, or interfere with TUI rendering. `ctx.ui.notify(message, severity)` integrates with the Pi message area, rendering notifications properly themed and visible to the user. Severity levels include `"info"`, `"success"`, `"warning"`, and `"error"`. Reserve `console.*` for local debugging or development-only diagnostics, never for warnings or errors the user needs to see.
+See [`CONVENTIONS.md`](./CONVENTIONS.md) for coding conventions, style rules, and idioms used in this repository.
+
+## Agent Interaction
+
+### Tests
+Test files in `tests/` are verbose integration suites. Do **not** read them speculatively or in full to "understand the codebase."
+
+- **Spec over tests.** For behavioral questions, read `spec/DESIGN.md` (and any `spec/DESIGN_EXTENSION.*.md`) first. The spec is the source of truth; tests are verification artifacts.
+- **Search before reading.** Use `bash` with `rg`/`grep`/`sed` to locate relevant `describe` / `it` blocks by keyword. Never page through a large test file blindly.
+- **Read selectively.** If a specific test block is needed (e.g., debugging a failure), use `read` with `limit`/`offset` to extract only that block.

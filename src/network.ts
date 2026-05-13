@@ -4,12 +4,8 @@ export interface NetworkConfig {
   denyCidrs?: string[];
 }
 
-export function isEmptyNetwork(network: unknown): boolean {
-  return typeof network === "object" && network !== null && Object.keys(network).length === 0;
-}
-
 function validateDomainLabels(d: string): void {
-  const labels = d.split(".");
+  const labels = d.split('.');
   if (labels.some((l) => l.length === 0)) {
     throw new Error(`Invalid domain: empty label: ${d}`);
   }
@@ -21,37 +17,37 @@ function validateDomainLabels(d: string): void {
   }
 }
 
-export function canonicalizeDomain(domain: string): { type: "exact" | "wildcard"; value: string } {
+export function canonicalizeDomain(domain: string): { type: 'exact' | 'wildcard'; value: string } {
   let d = domain.toLowerCase();
-  if (d.endsWith(".")) d = d.slice(0, -1);
+  if (d.endsWith('.')) d = d.slice(0, -1);
 
-  if (d === "*") throw new Error(`Invalid domain: bare "*" is not allowed`);
+  if (d === '*') throw new Error(`Invalid domain: bare "*" is not allowed`);
 
   if (/^\d+\.\d+\.\d+\.\d+$/.test(d)) {
     throw new Error(`Invalid domain: IP literals are not allowed: ${domain}`);
   }
 
-  if (d.includes("*")) {
-    if (!d.startsWith("*.")) {
+  if (d.includes('*')) {
+    if (!d.startsWith('*.')) {
       throw new Error(`Invalid domain: wildcard must be "*.example.com", got ${domain}`);
     }
     const rest = d.slice(2);
-    if (rest.includes("*")) {
+    if (rest.includes('*')) {
       throw new Error(`Invalid domain: embedded wildcard not allowed: ${domain}`);
     }
     validateDomainLabels(rest);
-    return { type: "wildcard", value: "." + rest };
+    return { type: 'wildcard', value: '.' + rest };
   }
 
   validateDomainLabels(d);
-  return { type: "exact", value: d };
+  return { type: 'exact', value: d };
 }
 
 export function normalizeCidr(cidr: string): string {
-  const [ipPart, prefixPart] = cidr.split("/");
+  const [ipPart, prefixPart] = cidr.split('/');
   if (!ipPart) throw new Error(`Invalid CIDR: ${cidr}`);
 
-  const parts = ipPart.split(".").map(Number);
+  const parts = ipPart.split('.').map(Number);
   if (parts.length !== 4 || parts.some((p) => Number.isNaN(p) || p < 0 || p > 255)) {
     throw new Error(`Invalid CIDR: ${cidr}`);
   }
@@ -66,22 +62,22 @@ export function normalizeCidr(cidr: string): string {
     }
   }
 
-  return `${parts.join(".")}/${String(prefix)}`;
+  return `${parts.join('.')}/${String(prefix)}`;
 }
 
-const NETWORK_KEYS = new Set(["domains", "cidrs", "denyCidrs"]);
+const NETWORK_KEYS = new Set(['domains', 'cidrs', 'denyCidrs']);
 
 const PRIVATE_CIDRS = [
-  "0.0.0.0/8",
-  "10.0.0.0/8",
-  "100.64.0.0/10",
-  "127.0.0.0/8",
-  "169.254.0.0/16",
-  "172.16.0.0/12",
-  "192.168.0.0/16",
-  "224.0.0.0/4",
-  "240.0.0.0/4",
-  "255.255.255.255/32",
+  '0.0.0.0/8',
+  '10.0.0.0/8',
+  '100.64.0.0/10',
+  '127.0.0.0/8',
+  '169.254.0.0/16',
+  '172.16.0.0/12',
+  '192.168.0.0/16',
+  '224.0.0.0/4',
+  '240.0.0.0/4',
+  '255.255.255.255/32',
 ];
 
 export function extractNetwork(
@@ -91,32 +87,34 @@ export function extractNetwork(
   if (value === undefined) {
     return { warnings: [] };
   }
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
     throw new Error(`network in ${context} must be an object`);
   }
   const obj = value as Record<string, unknown>;
   const warnings: string[] = [];
   for (const key of Object.keys(obj)) {
     if (!NETWORK_KEYS.has(key)) {
-      throw new Error(`[pi-sandbox] Unknown key "${key}" in ${context}#network`);
+      warnings.push(`[pi-sandbox] Unknown key "${key}" in ${context}#network — ignoring`);
     }
   }
 
-  if (Object.keys(obj).length === 0) {
+  const validKeys = Object.keys(obj).filter((k) => NETWORK_KEYS.has(k));
+  if (validKeys.length === 0) {
     return { config: undefined, warnings };
   }
 
   const result: NetworkConfig = {};
 
   if (obj.domains !== undefined) {
-    if (!Array.isArray(obj.domains)) throw new Error(`network.domains in ${context} must be an array`);
+    if (!Array.isArray(obj.domains))
+      throw new Error(`network.domains in ${context} must be an array`);
     const domains: string[] = [];
     for (const d of obj.domains) {
-      if (typeof d !== "string" || d.length === 0) {
+      if (typeof d !== 'string' || d.length === 0) {
         throw new Error(`network.domains in ${context} must be an array of non-empty strings`);
       }
       canonicalizeDomain(d);
-      domains.push(d.toLowerCase().replace(/\.$/, ""));
+      domains.push(d.toLowerCase().replace(/\.$/, ''));
     }
     result.domains = domains;
   }
@@ -127,7 +125,8 @@ export function extractNetwork(
   }
 
   if (obj.denyCidrs !== undefined) {
-    if (!Array.isArray(obj.denyCidrs)) throw new Error(`network.denyCidrs in ${context} must be an array`);
+    if (!Array.isArray(obj.denyCidrs))
+      throw new Error(`network.denyCidrs in ${context} must be an array`);
     result.denyCidrs = obj.denyCidrs.map((c) => normalizeCidr(String(c)));
   }
 
@@ -144,7 +143,7 @@ export function generateSingBoxConfig(network: NetworkConfig): unknown {
 
   for (const d of domains) {
     const canonical = canonicalizeDomain(d);
-    if (canonical.type === "exact") {
+    if (canonical.type === 'exact') {
       exactDomains.push(canonical.value);
     } else {
       wildcardDomains.push(canonical.value);
@@ -155,72 +154,72 @@ export function generateSingBoxConfig(network: NetworkConfig): unknown {
 
   const cidrEntries = [
     ...PRIVATE_CIDRS.map((c) => ({ cidr: c, deny: true as const })),
-    { cidr: "::/0", deny: true as const },
+    { cidr: '::/0', deny: true as const },
     ...denyCidrs.map((c) => ({ cidr: c, deny: true as const })),
     ...cidrs.map((c) => ({ cidr: c, deny: false as const })),
   ];
   cidrEntries.sort((a, b) => {
-    const pa = Number(a.cidr.split("/")[1]);
-    const pb = Number(b.cidr.split("/")[1]);
+    const pa = Number(a.cidr.split('/')[1]);
+    const pb = Number(b.cidr.split('/')[1]);
     if (pb !== pa) return pb - pa;
     return a.deny === b.deny ? 0 : a.deny ? -1 : 1;
   });
 
   const dnsRules: unknown[] = [];
   for (const d of exactDomains) {
-    dnsRules.push({ domain: d, action: "route", server: "upstream" });
+    dnsRules.push({ domain: d, action: 'route', server: 'upstream' });
   }
   for (const d of wildcardDomains) {
-    dnsRules.push({ domain_suffix: d, action: "route", server: "upstream" });
+    dnsRules.push({ domain_suffix: d, action: 'route', server: 'upstream' });
   }
-  dnsRules.push({ action: "reject" });
+  dnsRules.push({ action: 'reject' });
 
   const routeRules: unknown[] = [
-    { inbound: ["tun-in"], action: "sniff" },
-    { port: [53], action: "hijack-dns" },
+    { inbound: ['tun-in'], action: 'sniff' },
+    { port: [53], action: 'hijack-dns' },
   ];
 
   for (const entry of cidrEntries) {
     if (entry.deny) {
-      routeRules.push({ ip_cidr: [entry.cidr], action: "reject" });
+      routeRules.push({ ip_cidr: [entry.cidr], action: 'reject' });
     } else {
-      routeRules.push({ ip_cidr: [entry.cidr], action: "route", outbound: "direct" });
+      routeRules.push({ ip_cidr: [entry.cidr], action: 'route', outbound: 'direct' });
     }
   }
 
   for (const d of exactDomains) {
-    routeRules.push({ domain: d, action: "route", outbound: "direct" });
+    routeRules.push({ domain: d, action: 'route', outbound: 'direct' });
   }
   for (const d of wildcardDomains) {
-    routeRules.push({ domain_suffix: d, action: "route", outbound: "direct" });
+    routeRules.push({ domain_suffix: d, action: 'route', outbound: 'direct' });
   }
-  routeRules.push({ action: "reject" });
+  routeRules.push({ action: 'reject' });
 
   return {
-    log: { level: "warn" },
+    log: { level: 'warn' },
     dns: {
-      servers: [{ tag: "upstream", type: "udp", server: "1.1.1.1" }],
+      servers: [{ tag: 'upstream', type: 'udp', server: '1.1.1.1' }],
       rules: dnsRules,
     },
     inbounds: [
       {
-        type: "tun",
-        tag: "tun-in",
-        interface_name: "sb-tun0",
-        address: ["198.18.0.1/30"],
+        type: 'tun',
+        tag: 'tun-in',
+        interface_name: 'sb-tun0',
+        address: ['198.18.0.1/30'],
         mtu: 9000,
         auto_route: true,
         strict_route: true,
-        stack: "system",
+        stack: 'system',
         sniff: true,
         sniff_override_destination: true,
       },
     ],
-    outbounds: [{ type: "direct", tag: "direct" }],
+    outbounds: [{ type: 'direct', tag: 'direct' }],
     route: {
       rules: routeRules,
       auto_detect_interface: true,
-      default_domain_resolver: "upstream",
+      default_domain_resolver: 'upstream',
     },
   };
 }
@@ -236,8 +235,8 @@ export function checkBuiltInDenyOverlaps(network: NetworkConfig): string[] {
     if (builtInSet.has(cidr)) {
       warnings.push(
         `[pi-sandbox] CIDR "${cidr}" in network.cidrs matches a built-in private-range deny rule. ` +
-        `Because built-in denies win ties at the same prefix length, this allow will be blocked. ` +
-        `Use a more specific prefix (e.g. "${cidr.replace(/\/\d+$/, "/32")}") if you need to allow a specific host.`,
+          `Because built-in denies win ties at the same prefix length, this allow will be blocked. ` +
+          `Use a more specific prefix (e.g. "${cidr.replace(/\/\d+$/, '/32')}") if you need to allow a specific host.`,
       );
     }
   }
