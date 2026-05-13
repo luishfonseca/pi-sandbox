@@ -406,6 +406,139 @@ function abortedResult(): ExecInContainerResult {
   return { stdout: '', stderr: '', exitCode: null, timedOut: false, aborted: true };
 }
 
+interface OutputBuffers {
+  onStdout: (chunk: Buffer) => void;
+  onStderr: (chunk: Buffer) => void;
+  getStdout: () => string;
+  getStderr: () => string;
+}
+
+function createOutputBuffers(
+  onUpdate?: (payload: {
+    content: { type: 'text'; text: string }[];
+    details: { truncation?: TruncationResult | undefined };
+  }) => void,
+): OutputBuffers {
+  const stdoutChunks: Buffer[] = [];
+  const stderrChunks: Buffer[] = [];
+  const rollingChunks: Buffer[] = [];
+  let rollingBytes = 0;
+  const maxRollingBytes = DEFAULT_MAX_BYTES * 2;
+
+  function pushToRolling(chunk: Buffer): void {
+    rollingChunks.push(chunk);
+    rollingBytes += chunk.length;
+    while (rollingBytes > maxRollingBytes && rollingChunks.length > 1) {
+      const removed = rollingChunks.shift();
+      if (removed === undefined) break;
+      rollingBytes -= removed.length;
+    }
+  }
+
+  function emitUpdate(): void {
+    if (!onUpdate) return;
+    const fullBuffer = Buffer.concat(rollingChunks);
+    const fullText = fullBuffer.toString('utf-8');
+    const truncation = truncateTail(fullText, {
+      maxLines: DEFAULT_MAX_LINES,
+      maxBytes: DEFAULT_MAX_BYTES,
+    });
+    onUpdate({
+      content: [{ type: 'text', text: truncation.content || '' }],
+      details: truncation.truncated ? { truncation } : {},
+    });
+  }
+
+  return {
+    onStdout: (chunk: Buffer): void => {
+      stdoutChunks.push(chunk);
+      pushToRolling(chunk);
+      emitUpdate();
+    },
+    onStderr: (chunk: Buffer): void => {
+      stderrChunks.push(chunk);
+      pushToRolling(chunk);
+      emitUpdate();
+    },
+    getStdout: (): string => Buffer.concat(stdoutChunks).toString('utf-8'),
+    getStderr: (): string => Buffer.concat(stderrChunks).toString('utf-8'),
+  };
+}
+
+async function waitForStream(
+  stream: NodeJS.ReadableStream,
+  state: { timedOut: boolean; aborted: boolean },
+): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const onEnd = (): void => {
+      cleanup();
+      resolve();
+    };
+    const onClose = (): void => {
+      cleanup();
+      resolve();
+    };
+    const onError = (err: Error): void => {
+      cleanup();
+      if (state.timedOut || state.aborted) {
+        resolve();
+      } else {
+        reject(err);
+      }
+    };
+    const cleanup = (): void => {
+      stream.off('end', onEnd);
+      stream.off('close', onClose);
+      stream.off('error', onError);
+    };
+    stream.on('end', onEnd);
+    stream.on('close', onClose);
+    stream.on('error', onError);
+  });
+}
+
+function setupExecTimeouts(
+  exec: Dockerode.Exec,
+  stream: NodeJS.ReadableStream,
+  timeout: number | undefined,
+  signal: AbortSignal | undefined,
+  state: { timedOut: boolean; aborted: boolean },
+): { timer: ReturnType<typeof setTimeout> | undefined; abortHandler: (() => void) | undefined } {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  if (timeout !== undefined && timeout > 0) {
+    timer = setTimeout(() => {
+      state.timedOut = true;
+      void killExec(exec, 'SIGKILL');
+      (stream as unknown as { destroy(): void }).destroy();
+    }, timeout * 1000);
+  }
+
+  let abortHandler: (() => void) | undefined;
+  if (signal) {
+    abortHandler = (): void => {
+      state.aborted = true;
+      void killExec(exec, 'SIGKILL');
+      (stream as unknown as { destroy(): void }).destroy();
+    };
+    signal.addEventListener('abort', abortHandler);
+  }
+
+  return { timer, abortHandler };
+}
+
+function teardownExecTimeouts(
+  timer: ReturnType<typeof setTimeout> | undefined,
+  abortHandler: (() => void) | undefined,
+  signal: AbortSignal | undefined,
+): void {
+  if (timer !== undefined) {
+    clearTimeout(timer);
+  }
+  if (abortHandler !== undefined && signal) {
+    signal.removeEventListener('abort', abortHandler);
+  }
+}
+
 export async function execInContainer(
   container: Dockerode.Container,
   options: ExecInContainerOptions,
@@ -435,107 +568,22 @@ export async function execInContainer(
     return abortedResult();
   }
 
+  const buffers = createOutputBuffers(onUpdate);
   const stdout = new PassThrough();
   const stderr = new PassThrough();
-  const stdoutChunks: Buffer[] = [];
-  const stderrChunks: Buffer[] = [];
-  const rollingChunks: Buffer[] = [];
-  let rollingBytes = 0;
-  const maxRollingBytes = DEFAULT_MAX_BYTES * 2;
 
-  const pushToRollingBuffer = (chunk: Buffer): void => {
-    rollingChunks.push(chunk);
-    rollingBytes += chunk.length;
-    while (rollingBytes > maxRollingBytes && rollingChunks.length > 1) {
-      const removed = rollingChunks.shift();
-      if (removed === undefined) break;
-      rollingBytes -= removed.length;
-    }
-  };
-
-  const emitUpdate = (): void => {
-    if (!onUpdate) return;
-    const fullBuffer = Buffer.concat(rollingChunks);
-    const fullText = fullBuffer.toString('utf-8');
-    const truncation = truncateTail(fullText, {
-      maxLines: DEFAULT_MAX_LINES,
-      maxBytes: DEFAULT_MAX_BYTES,
-    });
-    onUpdate({
-      content: [{ type: 'text', text: truncation.content || '' }],
-      details: truncation.truncated ? { truncation } : {},
-    });
-  };
-
-  stdout.on('data', (chunk: Buffer): void => {
-    stdoutChunks.push(chunk);
-    pushToRollingBuffer(chunk);
-    emitUpdate();
-  });
-
-  stderr.on('data', (chunk: Buffer): void => {
-    stderrChunks.push(chunk);
-    pushToRollingBuffer(chunk);
-    emitUpdate();
-  });
+  stdout.on('data', buffers.onStdout);
+  stderr.on('data', buffers.onStderr);
 
   const modem = (exec as unknown as { modem: DockerModem }).modem;
   modem.demuxStream(stream, stdout, stderr);
 
   const state = { timedOut: false, aborted: false };
-  let timer: ReturnType<typeof setTimeout> | undefined;
+  const { timer, abortHandler } = setupExecTimeouts(exec, stream, timeout, signal, state);
 
-  if (timeout !== undefined && timeout > 0) {
-    timer = setTimeout(() => {
-      state.timedOut = true;
-      void killExec(exec, 'SIGKILL');
-      stream.destroy();
-    }, timeout * 1000);
-  }
+  await waitForStream(stream, state);
 
-  let abortHandler: (() => void) | undefined;
-  if (signal) {
-    abortHandler = (): void => {
-      state.aborted = true;
-      void killExec(exec, 'SIGKILL');
-      stream.destroy();
-    };
-    signal.addEventListener('abort', abortHandler);
-  }
-
-  await new Promise<void>((resolve, reject) => {
-    const onEnd = (): void => {
-      cleanup();
-      resolve();
-    };
-    const onClose = (): void => {
-      cleanup();
-      resolve();
-    };
-    const onError = (err: Error): void => {
-      cleanup();
-      if (state.timedOut || state.aborted) {
-        resolve();
-      } else {
-        reject(err);
-      }
-    };
-    const cleanup = (): void => {
-      stream.off('end', onEnd);
-      stream.off('close', onClose);
-      stream.off('error', onError);
-    };
-    stream.on('end', onEnd);
-    stream.on('close', onClose);
-    stream.on('error', onError);
-  });
-
-  if (timer !== undefined) {
-    clearTimeout(timer);
-  }
-  if (abortHandler !== undefined && signal) {
-    signal.removeEventListener('abort', abortHandler);
-  }
+  teardownExecTimeouts(timer, abortHandler, signal);
 
   let exitCode: number | null = null;
   if (!state.timedOut && !state.aborted) {
@@ -551,12 +599,9 @@ export async function execInContainer(
     }
   }
 
-  const resultStdout = Buffer.concat(stdoutChunks).toString('utf-8');
-  const resultStderr = Buffer.concat(stderrChunks).toString('utf-8');
-
   return {
-    stdout: resultStdout,
-    stderr: resultStderr,
+    stdout: buffers.getStdout(),
+    stderr: buffers.getStderr(),
     exitCode,
     timedOut: state.timedOut,
     aborted: state.aborted,

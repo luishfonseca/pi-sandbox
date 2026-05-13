@@ -34,12 +34,111 @@ import {
   releaseSessionRef,
   resetState,
 } from './lifecycle.js';
-import { hasNetworkPolicy } from './network.js';
+import { hasNetworkPolicy, type NetworkConfig } from './network.js';
 import { Mutex, type SandboxState, createSandboxState } from './state.js';
 import type { ExtensionAPI } from '@mariozechner/pi-coding-agent';
 import { createBashTool, isToolCallEventType } from '@mariozechner/pi-coding-agent';
 import Dockerode from 'dockerode';
 import { existsSync, readdirSync, realpathSync } from 'node:fs';
+
+function buildFallbackConfig(memoryConfig: SandboxConfig | undefined): SandboxConfig {
+  const config: SandboxConfig = {
+    image: memoryConfig?.image ?? 'unknown',
+    env: memoryConfig?.env ?? {},
+    filesystem: memoryConfig?.filesystem ?? { rw: [], ro: [] },
+  };
+  if (memoryConfig?.network) {
+    config.network = memoryConfig.network;
+  }
+  return config;
+}
+
+function loadConfigWithFallback(
+  workspacePath: string,
+  loadConfigFn: typeof loadConfig,
+  memoryConfig: SandboxConfig | undefined,
+): { config: SandboxConfig; error?: Error } {
+  try {
+    const { config: loaded } = loadConfigFn(workspacePath);
+    const { config: augmented } = augmentConfigWithPiDir(loaded);
+    return { config: augmented };
+  } catch (err) {
+    return {
+      config: buildFallbackConfig(memoryConfig),
+      error: err instanceof Error ? err : new Error(String(err)),
+    };
+  }
+}
+
+function formatNetworkSection(network: NetworkConfig | undefined): string {
+  if (network === undefined || Object.keys(network).length === 0) {
+    return 'Network: none';
+  }
+  const allow: string[] = [];
+  if (network.domains?.length) allow.push(...network.domains);
+  if (network.cidrs?.length) allow.push(...network.cidrs);
+  const deny = network.denyCidrs ?? [];
+  return `Network:\n  allow: ${allow.join(', ') || '(none)'}\n  deny: ${deny.join(', ') || '(none)'}`;
+}
+
+function formatConfigStaleness(storedHash: string | undefined, configHash: string): string {
+  if (storedHash === undefined) return 'unknown';
+  if (storedHash === configHash) return 'current';
+  return `stale — running container was created with ${storedHash}`;
+}
+
+function formatSandboxStatusLines(
+  workspacePath: string,
+  containerName: string,
+  containerStatus: string,
+  config: SandboxConfig,
+  configHash: string,
+  configStaleness: string,
+  sessionIds: string[],
+): string[] {
+  return [
+    'Sandbox status:',
+    `Workspace: ${workspacePath}`,
+    `Container: ${containerName} (${containerStatus})`,
+    `Image: ${config.image}`,
+    `Config hash: ${configHash} (${configStaleness})`,
+    'Filesystem:',
+    `  rw: ${config.filesystem.rw.join(', ') || '(none)'}`,
+    `  ro: ${config.filesystem.ro.join(', ') || '(none)'}`,
+    formatNetworkSection(config.network),
+    `Sessions: ${String(sessionIds.length)} active (${sessionIds.slice(0, 10).join(', ')}${sessionIds.length > 10 ? ', ...' : ''})`,
+  ];
+}
+
+function resolveToolPath(
+  path: unknown,
+  workspaceAbsolutePath: string,
+): { resolved: string } | { block: true; reason: string } {
+  if (typeof path !== 'string') {
+    return { block: true, reason: 'Missing or invalid path argument' };
+  }
+
+  const normalized = resolvePath(path, workspaceAbsolutePath);
+
+  try {
+    const resolved = resolveSymlinks(normalized);
+    return { resolved };
+  } catch (err) {
+    if (isNodeError(err)) {
+      switch (err.code) {
+        case 'ENOENT':
+          return { block: true, reason: `Path outside workspace: ${path}` };
+        case 'EACCES':
+          return { block: true, reason: `Permission denied resolving path: ${path}` };
+        case 'ELOOP':
+          return { block: true, reason: `Symlink loop detected: ${path}` };
+        case 'ENOTDIR':
+          return { block: true, reason: `Not a directory in path: ${path}` };
+      }
+    }
+    throw err;
+  }
+}
 
 export interface SandboxExtensionOptions {
   docker?: Dockerode;
@@ -150,34 +249,14 @@ export function createSandboxExtension(
         return undefined;
       }
 
-      if (typeof path !== 'string') {
-        return { block: true, reason: 'Missing or invalid path argument' };
-      }
-
-      const normalized = resolvePath(path, state.workspaceAbsolutePath);
-
-      let resolved: string;
-      try {
-        resolved = resolveSymlinks(normalized);
-      } catch (err) {
-        if (isNodeError(err)) {
-          switch (err.code) {
-            case 'ENOENT':
-              return { block: true, reason: `Path outside workspace: ${path}` };
-            case 'EACCES':
-              return { block: true, reason: `Permission denied resolving path: ${path}` };
-            case 'ELOOP':
-              return { block: true, reason: `Symlink loop detected: ${path}` };
-            case 'ENOTDIR':
-              return { block: true, reason: `Not a directory in path: ${path}` };
-          }
-        }
-        throw err;
+      const pathResult = resolveToolPath(path, state.workspaceAbsolutePath);
+      if ('block' in pathResult) {
+        return { block: true, reason: pathResult.reason };
       }
 
       const operation: AccessOperation = event.toolName === 'read' ? 'read' : 'write';
       const result = evaluateAccess(
-        resolved,
+        pathResult.resolved,
         operation,
         state.config.filesystem,
         state.workspaceAbsolutePath,
@@ -206,25 +285,16 @@ export function createSandboxExtension(
         const containerName = computeContainerName(workspacePath);
         const stateDir = getStateDir(ctx.sessionManager.getSessionDir());
 
-        let effectiveConfig: SandboxConfig;
-        try {
-          const { config: loadedConfig } = loadConfigFn(workspacePath);
-          const { config: augmentedConfig } = augmentConfigWithPiDir(loadedConfig);
-          effectiveConfig = augmentedConfig;
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
+        const { config: effectiveConfig, error: configError } = loadConfigWithFallback(
+          workspacePath,
+          loadConfigFn,
+          state.config,
+        );
+        if (configError) {
           ctx.ui.notify(
-            `Failed to load sandbox config: ${msg}. Using in-memory config.`,
+            `Failed to load sandbox config: ${configError.message}. Using in-memory config.`,
             'warning',
           );
-          effectiveConfig = {
-            image: state.config?.image ?? 'unknown',
-            env: state.config?.env ?? {},
-            filesystem: state.config?.filesystem ?? { rw: [], ro: [] },
-          };
-          if (state.config?.network) {
-            effectiveConfig.network = state.config.network;
-          }
         }
 
         const configHash = computeConfigHash(effectiveConfig);
@@ -250,42 +320,16 @@ export function createSandboxExtension(
           }
         }
 
-        let configStaleness: string;
-        if (storedHash === undefined) {
-          configStaleness = 'unknown';
-        } else if (storedHash === configHash) {
-          configStaleness = 'current';
-        } else {
-          configStaleness = `stale — running container was created with ${storedHash}`;
-        }
-
-        let networkLines: string;
-        if (
-          effectiveConfig.network === undefined ||
-          Object.keys(effectiveConfig.network).length === 0
-        ) {
-          networkLines = 'Network: none';
-        } else {
-          const allow: string[] = [];
-          if (effectiveConfig.network.domains?.length)
-            allow.push(...effectiveConfig.network.domains);
-          if (effectiveConfig.network.cidrs?.length) allow.push(...effectiveConfig.network.cidrs);
-          const deny = effectiveConfig.network.denyCidrs ?? [];
-          networkLines = `Network:\n  allow: ${allow.join(', ') || '(none)'}\n  deny: ${deny.join(', ') || '(none)'}`;
-        }
-
-        const lines = [
-          'Sandbox status:',
-          `Workspace: ${workspacePath}`,
-          `Container: ${containerName} (${containerStatus})`,
-          `Image: ${effectiveConfig.image}`,
-          `Config hash: ${configHash} (${configStaleness})`,
-          'Filesystem:',
-          `  rw: ${effectiveConfig.filesystem.rw.join(', ') || '(none)'}`,
-          `  ro: ${effectiveConfig.filesystem.ro.join(', ') || '(none)'}`,
-          networkLines,
-          `Sessions: ${String(sessionIds.length)} active (${sessionIds.slice(0, 10).join(', ')}${sessionIds.length > 10 ? ', ...' : ''})`,
-        ];
+        const configStaleness = formatConfigStaleness(storedHash, configHash);
+        const lines = formatSandboxStatusLines(
+          workspacePath,
+          containerName,
+          containerStatus,
+          effectiveConfig,
+          configHash,
+          configStaleness,
+          sessionIds,
+        );
 
         ctx.ui.notify(lines.join('\n'), 'info');
       },
@@ -309,25 +353,16 @@ export function createSandboxExtension(
           return;
         }
 
-        let effectiveConfig: SandboxConfig;
-        try {
-          const { config: loadedConfig } = loadConfigFn(workspacePath);
-          const { config: augmentedConfig } = augmentConfigWithPiDir(loadedConfig);
-          effectiveConfig = augmentedConfig;
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
+        const { config: effectiveConfig, error: configError } = loadConfigWithFallback(
+          workspacePath,
+          loadConfigFn,
+          state.config,
+        );
+        if (configError) {
           ctx.ui.notify(
-            `Failed to load config for reset: ${msg}. Sidecar may not be removed.`,
+            `Failed to load config for reset: ${configError.message}. Sidecar may not be removed.`,
             'warning',
           );
-          effectiveConfig = {
-            image: state.config?.image ?? 'unknown',
-            env: state.config?.env ?? {},
-            filesystem: state.config?.filesystem ?? { rw: [], ro: [] },
-          };
-          if (state.config?.network) {
-            effectiveConfig.network = state.config.network;
-          }
         }
 
         const stale = countStaleRefs(stateDir);

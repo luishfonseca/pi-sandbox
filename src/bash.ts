@@ -131,6 +131,152 @@ export function createEnsureConnected(
   };
 }
 
+function createErrorResult(
+  text: string,
+  details?: Record<string, unknown>,
+): AgentToolResult<unknown> {
+  return {
+    content: [{ type: 'text' as const, text }],
+    details: details ?? { error: text },
+    isError: true,
+  } as AgentToolResult<unknown>;
+}
+
+function parseTimeout(raw: unknown): number | undefined {
+  if (typeof raw === 'number' && Number.isFinite(raw) && raw > 0) {
+    return raw;
+  }
+  return undefined;
+}
+
+function buildExecOptions(
+  command: string,
+  cwd: string,
+  timeout: number | undefined,
+  signal: AbortSignal | undefined,
+  onUpdate: AgentToolUpdateCallback<unknown> | undefined,
+): ExecInContainerOptions {
+  const opts: ExecInContainerOptions = { command, cwd, signal, onUpdate };
+  if (timeout !== undefined) {
+    opts.timeout = timeout;
+  }
+  return opts;
+}
+
+interface SidecarMonitor {
+  abortController: AbortController;
+  deathPromise: Promise<void>;
+}
+
+async function beginSidecarMonitoring(
+  docker: Dockerode,
+  workspaceAbsolutePath: string,
+): Promise<{ monitor: SidecarMonitor } | { error: string }> {
+  const sidecarName = computeSidecarName(workspaceAbsolutePath);
+  const abortController = new AbortController();
+  const deathPromise = watchSidecarEvents(docker, sidecarName, abortController.signal);
+
+  const healthy = await isSidecarHealthy(docker, sidecarName);
+  if (!healthy) {
+    abortController.abort();
+    return {
+      error: 'Egress sidecar is not healthy. Run /sandbox-reset to recreate the sandbox.',
+    };
+  }
+
+  return { monitor: { abortController, deathPromise } };
+}
+
+async function raceExecAgainstSidecar(
+  execPromise: Promise<ExecInContainerResult>,
+  sidecarDeathPromise: Promise<void>,
+  docker: Dockerode,
+  workspaceAbsolutePath: string,
+): Promise<{ result: ExecInContainerResult } | { error: string }> {
+  const execWrapped = execPromise.then((r) => ({ type: 'exec' as const, result: r }));
+  const sidecarWrapped = sidecarDeathPromise.then(() => ({ type: 'sidecar' as const }));
+
+  const race = await Promise.race([execWrapped, sidecarWrapped]);
+
+  if (race.type === 'sidecar') {
+    const appName = computeContainerName(workspaceAbsolutePath);
+    await killContainer(docker, appName);
+    try {
+      await execPromise;
+    } catch {
+      /* ignore */
+    }
+    return {
+      error:
+        'Egress sidecar died during command execution. Run /sandbox-reset to recreate the sandbox.',
+    };
+  }
+
+  return { result: race.result };
+}
+
+function formatExecResult(
+  execResult: ExecInContainerResult,
+  timeout: number | undefined,
+): {
+  text: string;
+  isError: boolean;
+  details: { exitCode: number | null; stdout: string; stderr: string };
+} {
+  const combinedOutput = execResult.stdout + execResult.stderr;
+  const truncation = truncateTail(combinedOutput, {
+    maxLines: DEFAULT_MAX_LINES,
+    maxBytes: DEFAULT_MAX_BYTES,
+  });
+  let text = truncation.content || '';
+  if (truncation.truncated) {
+    text += `\n\n[Output truncated: ${String(truncation.outputLines)} of ${String(truncation.totalLines)} lines (${formatSize(truncation.outputBytes)} of ${formatSize(truncation.totalBytes)}).]`;
+  }
+
+  if (execResult.aborted) {
+    text += '\n\nCommand aborted';
+    return {
+      text,
+      isError: true,
+      details: {
+        exitCode: null,
+        stdout: execResult.stdout,
+        stderr: execResult.stderr,
+      },
+    };
+  }
+
+  if (execResult.timedOut) {
+    text += `\n\nCommand timed out after ${String(timeout)} seconds`;
+    return {
+      text,
+      isError: true,
+      details: {
+        exitCode: null,
+        stdout: execResult.stdout,
+        stderr: execResult.stderr,
+      },
+    };
+  }
+
+  if (execResult.exitCode !== 0 && execResult.exitCode !== null) {
+    text += `\n\nCommand exited with code ${String(execResult.exitCode)}`;
+  }
+  if (!text) {
+    text = '(no output)';
+  }
+
+  return {
+    text,
+    isError: execResult.exitCode !== 0,
+    details: {
+      exitCode: execResult.exitCode,
+      stdout: execResult.stdout,
+      stderr: execResult.stderr,
+    },
+  };
+}
+
 export function createBashToolHandler(
   deps: BashToolDependencies,
 ): (
@@ -152,185 +298,79 @@ export function createBashToolHandler(
     }
 
     if (deps.state.fatalError) {
-      return {
-        content: [{ type: 'text' as const, text: deps.state.fatalError }],
-        details: { error: deps.state.fatalError },
-        isError: true,
-      };
+      return createErrorResult(deps.state.fatalError);
     }
 
     if (deps.state.pull.isPulling) {
-      return {
-        content: [
-          {
-            type: 'text' as const,
-            text: `Pulling sandbox image ${deps.state.config?.image ?? 'unknown'}...`,
-          },
-        ],
-        details: { error: 'Image pull in progress' },
-        isError: true,
-      };
+      return createErrorResult(
+        `Pulling sandbox image ${deps.state.config?.image ?? 'unknown'}...`,
+        { error: 'Image pull in progress' },
+      );
     }
 
     const connected = await deps.ensureConnected(ctx);
     if ('error' in connected) {
-      return {
-        content: [{ type: 'text' as const, text: connected.error }],
-        details: { error: connected.error },
-        isError: true,
-      };
+      return createErrorResult(connected.error);
     }
 
     const container = connected.container;
     const workspaceAbsolutePath = deps.state.workspaceAbsolutePath;
 
     if (workspaceAbsolutePath === undefined) {
-      return {
-        content: [{ type: 'text' as const, text: 'Sandbox container not running' }],
-        details: { error: 'Sandbox container not running' },
-        isError: true,
-      };
+      return createErrorResult('Sandbox container not running');
     }
 
     try {
-      let timeout: number | undefined;
-      if (
-        typeof params.timeout === 'number' &&
-        Number.isFinite(params.timeout) &&
-        params.timeout > 0
-      ) {
-        timeout = params.timeout;
-      }
-
-      const execOptions: ExecInContainerOptions = {
-        command: params.command,
-        cwd: workspaceAbsolutePath,
+      const timeout = parseTimeout(params.timeout);
+      const execOptions = buildExecOptions(
+        params.command,
+        workspaceAbsolutePath,
+        timeout,
         signal,
         onUpdate,
-      };
-      if (timeout !== undefined) {
-        execOptions.timeout = timeout;
-      }
+      );
 
-      let sidecarDeathPromise: Promise<void> | undefined;
-      let sidecarAbortController: AbortController | undefined;
-
+      let sidecarMonitor: SidecarMonitor | undefined;
       if (deps.state.config && hasNetworkPolicy(deps.state.config)) {
-        const sidecarName = computeSidecarName(workspaceAbsolutePath);
-
-        // Start the watcher BEFORE the point-in-time health check to close the
-        // race window where the sidecar dies between inspection and subscription.
-        sidecarAbortController = new AbortController();
-        sidecarDeathPromise = watchSidecarEvents(
-          deps.docker,
-          sidecarName,
-          sidecarAbortController.signal,
-        );
-
-        const healthy = await isSidecarHealthy(deps.docker, sidecarName);
-        if (!healthy) {
-          sidecarAbortController.abort();
-          deps.state.fatalError =
-            'Egress sidecar is not healthy. Run /sandbox-reset to recreate the sandbox.';
-          return {
-            content: [{ type: 'text' as const, text: deps.state.fatalError }],
-            details: { error: deps.state.fatalError },
-            isError: true,
-          };
+        const monitorResult = await beginSidecarMonitoring(deps.docker, workspaceAbsolutePath);
+        if ('error' in monitorResult) {
+          deps.state.fatalError = monitorResult.error;
+          return createErrorResult(monitorResult.error);
         }
+        sidecarMonitor = monitorResult.monitor;
       }
 
       const execPromise = deps.execInContainerFn(container, execOptions);
 
       let execResult: ExecInContainerResult;
-
-      if (sidecarDeathPromise) {
-        const execWrapped = execPromise.then((r) => ({ type: 'exec' as const, result: r }));
-        const sidecarWrapped = sidecarDeathPromise.then(() => ({ type: 'sidecar' as const }));
-
-        const race = await Promise.race([execWrapped, sidecarWrapped]);
-
-        if (race.type === 'sidecar') {
-          const appName = computeContainerName(workspaceAbsolutePath);
-          await killContainer(deps.docker, appName);
-          try {
-            await execPromise;
-          } catch {
-            /* ignore */
-          }
-          deps.state.fatalError =
-            'Egress sidecar died during command execution. Run /sandbox-reset to recreate the sandbox.';
-          return {
-            content: [{ type: 'text' as const, text: deps.state.fatalError }],
-            details: { error: deps.state.fatalError },
-            isError: true,
-          };
+      if (sidecarMonitor) {
+        const raceResult = await raceExecAgainstSidecar(
+          execPromise,
+          sidecarMonitor.deathPromise,
+          deps.docker,
+          workspaceAbsolutePath,
+        );
+        sidecarMonitor.abortController.abort();
+        if ('error' in raceResult) {
+          deps.state.fatalError = raceResult.error;
+          return createErrorResult(raceResult.error);
         }
-
-        sidecarAbortController?.abort();
-        execResult = race.result;
+        execResult = raceResult.result;
       } else {
         execResult = await execPromise;
       }
 
-      const combinedOutput = execResult.stdout + execResult.stderr;
-      const truncation = truncateTail(combinedOutput, {
-        maxLines: DEFAULT_MAX_LINES,
-        maxBytes: DEFAULT_MAX_BYTES,
-      });
-      let text = truncation.content || '';
-      if (truncation.truncated) {
-        text += `\n\n[Output truncated: ${String(truncation.outputLines)} of ${String(truncation.totalLines)} lines (${formatSize(truncation.outputBytes)} of ${formatSize(truncation.totalBytes)}).]`;
-      }
-
-      if (execResult.aborted) {
-        text += '\n\nCommand aborted';
-        return {
-          content: [{ type: 'text' as const, text }],
-          details: {
-            exitCode: null,
-            stdout: execResult.stdout,
-            stderr: execResult.stderr,
-          },
-          isError: true,
-        };
-      }
-
-      if (execResult.timedOut) {
-        text += `\n\nCommand timed out after ${String(timeout)} seconds`;
-        return {
-          content: [{ type: 'text' as const, text }],
-          details: {
-            exitCode: null,
-            stdout: execResult.stdout,
-            stderr: execResult.stderr,
-          },
-          isError: true,
-        };
-      }
-
-      if (execResult.exitCode !== 0 && execResult.exitCode !== null) {
-        text += `\n\nCommand exited with code ${String(execResult.exitCode)}`;
-      }
-      if (!text) {
-        text = '(no output)';
-      }
+      const formatted = formatExecResult(execResult, timeout);
       return {
-        content: [{ type: 'text' as const, text }],
-        details: {
-          exitCode: execResult.exitCode,
-          stdout: execResult.stdout,
-          stderr: execResult.stderr,
-        },
-        isError: execResult.exitCode !== 0,
+        content: [{ type: 'text' as const, text: formatted.text }],
+        details: formatted.details,
+        isError: formatted.isError,
       };
     } catch (err) {
       if (err instanceof DockerDaemonUnreachableError) {
-        return {
-          content: [{ type: 'text' as const, text: 'Docker daemon unreachable' }],
-          details: { error: 'Docker daemon unreachable' },
-          isError: true,
-        };
+        return createErrorResult('Docker daemon unreachable', {
+          error: 'Docker daemon unreachable',
+        });
       }
       throw err;
     }

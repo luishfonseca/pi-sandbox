@@ -206,6 +206,45 @@ export function validateConfig(config: SandboxConfig): void {
   }
 }
 
+function resolveImage(
+  workspaceObj: Record<string, unknown>,
+  globalObj: Record<string, unknown>,
+): string {
+  return typeof workspaceObj.image === 'string' && workspaceObj.image.length > 0
+    ? workspaceObj.image
+    : typeof globalObj.image === 'string'
+      ? globalObj.image
+      : '';
+}
+
+function resolveSidecarImage(globalObj: Record<string, unknown>): string | undefined {
+  return typeof globalObj.sidecarImage === 'string' && globalObj.sidecarImage.length > 0
+    ? globalObj.sidecarImage
+    : undefined;
+}
+
+function mergeNetwork(
+  workspaceObj: Record<string, unknown>,
+  globalObj: Record<string, unknown>,
+): { config?: NetworkConfig | undefined; warnings: string[] } {
+  const globalNetwork = extractNetwork(globalObj.network, 'global config');
+  const workspaceNetwork = extractNetwork(workspaceObj.network, 'workspace config');
+  const warnings = [...globalNetwork.warnings, ...workspaceNetwork.warnings];
+
+  let config: NetworkConfig | undefined;
+  if (workspaceObj.network !== undefined) {
+    config = workspaceNetwork.config;
+  } else if (globalObj.network !== undefined) {
+    config = globalNetwork.config;
+  }
+
+  if (config !== undefined) {
+    warnings.push(...checkBuiltInDenyOverlaps(config));
+  }
+
+  return { config, warnings };
+}
+
 export function mergeConfigs(
   globalRaw: unknown,
   workspaceRaw: unknown,
@@ -224,16 +263,8 @@ export function mergeConfigs(
   const workspaceFs = extractFilesystem(workspaceObj.filesystem, 'workspace config#filesystem');
   warnings.push(...globalFs.warnings, ...workspaceFs.warnings);
 
-  const globalNetwork = extractNetwork(globalObj.network, 'global config');
-  const workspaceNetwork = extractNetwork(workspaceObj.network, 'workspace config');
-  warnings.push(...globalNetwork.warnings, ...workspaceNetwork.warnings);
-
-  const image =
-    typeof workspaceObj.image === 'string' && workspaceObj.image.length > 0
-      ? workspaceObj.image
-      : typeof globalObj.image === 'string'
-        ? globalObj.image
-        : '';
+  const networkResult = mergeNetwork(workspaceObj, globalObj);
+  warnings.push(...networkResult.warnings);
 
   if (workspaceObj.sidecarImage !== undefined) {
     warnings.push(
@@ -241,24 +272,8 @@ export function mergeConfigs(
     );
   }
 
-  const sidecarImage =
-    typeof globalObj.sidecarImage === 'string' && globalObj.sidecarImage.length > 0
-      ? globalObj.sidecarImage
-      : undefined;
-
-  let network: NetworkConfig | undefined;
-  if (workspaceObj.network !== undefined) {
-    network = workspaceNetwork.config;
-  } else if (globalObj.network !== undefined) {
-    network = globalNetwork.config;
-  }
-
-  if (network !== undefined) {
-    warnings.push(...checkBuiltInDenyOverlaps(network));
-  }
-
   const result: SandboxConfig = {
-    image,
+    image: resolveImage(workspaceObj, globalObj),
     env: mergeStringMaps(globalEnv, workspaceEnv),
     filesystem: {
       rw: mergeStringLists(globalFs.config.rw, workspaceFs.config.rw),
@@ -266,11 +281,12 @@ export function mergeConfigs(
     },
   };
 
+  const sidecarImage = resolveSidecarImage(globalObj);
   if (sidecarImage !== undefined) {
     result.sidecarImage = sidecarImage;
   }
-  if (network !== undefined) {
-    result.network = network;
+  if (networkResult.config !== undefined) {
+    result.network = networkResult.config;
   }
 
   return { config: result, warnings };
