@@ -6,8 +6,10 @@ import {
   doesImageExist,
   ensureContainer,
   execInContainer,
+  installNftablesRules,
   pullImage,
   stopAndRemoveContainer,
+  stopAndRemoveNetwork,
 } from '../src/docker.js';
 import Dockerode from 'dockerode';
 import assert from 'node:assert';
@@ -338,6 +340,112 @@ describe('ensureContainer name conflict', () => {
     await assert.rejects(
       () => ensureContainer(docker, config, '/workspace', 'test-conflict-vanished'),
       /not found/,
+    );
+  });
+});
+
+describe('stopAndRemoveNetwork', () => {
+  it('resolves when network does not exist', async () => {
+    const docker = {
+      getNetwork: (): {
+        remove: () => Promise<never>;
+      } => ({
+        remove: (): Promise<never> =>
+          Promise.reject(Object.assign(new Error('not found'), { statusCode: 404 })),
+      }),
+    } as unknown as Dockerode;
+    await stopAndRemoveNetwork(docker, 'missing');
+  });
+
+  it('removes an existing network', async () => {
+    let removed = false;
+    const docker = {
+      getNetwork: (): {
+        remove: () => Promise<void>;
+      } => ({
+        remove: (): Promise<void> => {
+          removed = true;
+          return Promise.resolve();
+        },
+      }),
+    } as unknown as Dockerode;
+    await stopAndRemoveNetwork(docker, 'existing');
+    assert.strictEqual(removed, true);
+  });
+
+  it('throws DockerDaemonUnreachableError on connection error', async () => {
+    const docker = {
+      getNetwork: (): {
+        remove: () => Promise<never>;
+      } => ({
+        remove: (): Promise<never> => Promise.reject(new Error('ECONNREFUSED')),
+      }),
+    } as unknown as Dockerode;
+    await assert.rejects(() => stopAndRemoveNetwork(docker, 'foo'), /Docker daemon unreachable/);
+  });
+});
+
+describe('installNftablesRules', () => {
+  function createMockDocker(exitCode: number, _stderr: string): Dockerode {
+    return {
+      getContainer: (): {
+        exec: () => Promise<{
+          start: () => Promise<{
+            once: (event: string, handler: () => void) => void;
+            destroy: () => void;
+          }>;
+          inspect: () => Promise<{ ExitCode: number | null }>;
+        }>;
+      } => ({
+        exec: (): Promise<{
+          start: () => Promise<{
+            once: (event: string, handler: () => void) => void;
+            destroy: () => void;
+          }>;
+          inspect: () => Promise<{ ExitCode: number | null }>;
+          modem: { demuxStream: () => void };
+        }> =>
+          Promise.resolve({
+            start: (): Promise<{
+              once: (event: string, handler: () => void) => void;
+              destroy: () => void;
+            }> =>
+              Promise.resolve({
+                on: (_event: string, handler: () => void): void => {
+                  handler();
+                },
+                once: (_event: string, handler: () => void): void => {
+                  handler();
+                },
+                off: (): void => {
+                  // no-op
+                },
+                destroy: (): void => {
+                  // no-op
+                },
+              }),
+            inspect: (): Promise<{ ExitCode: number | null }> =>
+              Promise.resolve({ ExitCode: exitCode }),
+            modem: {
+              demuxStream: (): void => {
+                // no-op
+              },
+            },
+          }),
+      }),
+    } as unknown as Dockerode;
+  }
+
+  it('resolves when all commands succeed', async () => {
+    const docker = createMockDocker(0, '');
+    await installNftablesRules(docker, 'sidecar');
+  });
+
+  it('throws when a command fails', async () => {
+    const docker = createMockDocker(1, 'Error: Table already exists');
+    await assert.rejects(
+      () => installNftablesRules(docker, 'sidecar'),
+      /nft command failed \(exit 1\)/,
     );
   });
 });

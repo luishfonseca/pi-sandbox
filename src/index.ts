@@ -177,6 +177,37 @@ export function createSandboxExtension(
     // not a cross-session inter-process lock. See Mutex JSDoc for details.
     const lifecycleMutex = new Mutex();
 
+    async function cleanupWorkspaceResources(
+      workspacePath: string,
+      config: { network: NetworkConfig },
+    ): Promise<void> {
+      const errors: Error[] = [];
+
+      try {
+        await stopAndRemoveContainerFn(docker, computeContainerName(workspacePath));
+      } catch (err) {
+        errors.push(err instanceof Error ? err : new Error(String(err)));
+      }
+
+      if (hasNetworkPolicy(config)) {
+        try {
+          await stopAndRemoveContainerFn(docker, computeSidecarName(workspacePath));
+        } catch (err) {
+          errors.push(err instanceof Error ? err : new Error(String(err)));
+        }
+        try {
+          await stopAndRemoveNetwork(docker, computeNetworkName(workspacePath));
+        } catch (err) {
+          errors.push(err instanceof Error ? err : new Error(String(err)));
+        }
+      }
+
+      const firstError = errors[0];
+      if (firstError) {
+        throw firstError;
+      }
+    }
+
     pi.on('session_shutdown', async (_event, ctx) => {
       if (pi.getFlag('no-sandbox')) {
         return;
@@ -185,20 +216,16 @@ export function createSandboxExtension(
         return;
       }
 
-      const containerName = computeContainerName(state.workspaceAbsolutePath);
       const stateDir = getStateDir(ctx.sessionManager.getSessionDir());
       const isEmpty = releaseSessionRef(stateDir, ctx.sessionManager.getSessionId());
 
       if (isEmpty) {
         const release = await lifecycleMutex.acquire();
         try {
-          await stopAndRemoveContainerFn(docker, containerName);
-          if (state.config && hasNetworkPolicy(state.config)) {
-            const sidecarName = computeSidecarName(state.workspaceAbsolutePath);
-            const networkName = computeNetworkName(state.workspaceAbsolutePath);
-            await stopAndRemoveContainerFn(docker, sidecarName);
-            await stopAndRemoveNetwork(docker, networkName);
-          }
+          await cleanupWorkspaceResources(
+            state.workspaceAbsolutePath,
+            state.config ?? { network: {} },
+          );
           state.container = undefined;
           deleteConfigHash(stateDir);
         } finally {
@@ -356,7 +383,6 @@ export function createSandboxExtension(
         }
 
         const workspacePath = realpathSync(ctx.cwd);
-        const containerName = computeContainerName(workspacePath);
         const stateDir = getStateDir(ctx.sessionManager.getSessionDir());
 
         if (!existsSync(stateDir)) {
@@ -380,13 +406,7 @@ export function createSandboxExtension(
 
         const release = await lifecycleMutex.acquire();
         try {
-          await stopAndRemoveContainerFn(docker, containerName);
-          if (hasNetworkPolicy(effectiveConfig)) {
-            const sidecarName = computeSidecarName(workspacePath);
-            const networkName = computeNetworkName(workspacePath);
-            await stopAndRemoveContainerFn(docker, sidecarName);
-            await stopAndRemoveNetwork(docker, networkName);
-          }
+          await cleanupWorkspaceResources(workspacePath, effectiveConfig);
           state.container = undefined;
           delete state.fatalError;
           state.pull.isPulling = false;

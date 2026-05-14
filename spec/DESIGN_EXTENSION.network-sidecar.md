@@ -170,7 +170,7 @@ docker network create pi-sandbox-{workspaceHash}-net
 
 **No port publishing** is required.
 
-**Post-start hook:** After the sidecar container is running, the extension MUST execute a one-shot `docker exec` into the sidecar to install an nftables rule in the shared network namespace. The sing-box image sets `ENTRYPOINT ["sing-box"]`, so the exec MUST override the entrypoint (e.g. `--entrypoint nft`) to run the `nft` binary directly:
+**Post-start hook:** After the sidecar container is running, the extension MUST execute `nft` commands inside the sidecar to install an nftables rule in the shared network namespace. The sing-box image sets `ENTRYPOINT ["sing-box"]`, but `docker exec` (and dockerode's `container.exec`) runs the command directly without invoking the entrypoint, so `nft` can be executed directly:
 
 ```bash
 nft add table inet sb-guard
@@ -181,7 +181,7 @@ nft add rule inet sb-guard output oifname "eth0" meta mark != 0xCAFE drop
 - `inet` family covers both IPv4 and IPv6.
 - `oifname "eth0"` matches only the Docker bridge interface.
 - `meta mark != 0xCAFE drop` drops every packet that is not tagged with the sidecar's `routing_mark`.
-- The rule is installed **once** after creation. If the sidecar is restarted, the rule is recreated because the network namespace is recreated.
+- The rule is installed **once** after creation. If the sidecar is restarted, the rule is recreated because Docker creates a new network namespace on restart.
 - The official sing-box image is Alpine-based and already contains the `nftables` package (`nft` binary at `/usr/sbin/nft`). No custom image is required.
 
 **Precondition:** The sidecar is running and has `NET_ADMIN`.
@@ -218,7 +218,7 @@ There is **no** persistent event stream, sidecar death monitor, or automatic kil
 1. Ensure `pi-sandbox-{workspaceHash}-net` exists (create if absent).
 2. Generate sing-box config JSON from merged `network` config and write to state dir.
 3. Ensure sing-box sidecar exists and is running on `pi-sandbox-{workspaceHash}-net`. Create/start if absent, mounting the generated config.
-4. Install the nftables output rule in the sidecar (Sec. 3.3). This step is idempotent; running the `nft add` commands against an existing table/chain is a benign no-op.
+4. Install the nftables output rule in the sidecar (Sec. 3.3).
 5. Ensure app sandbox exists and is running with `NetworkMode: container:<sidecar>`. Create/start if absent.
 6. Write config hash to state dir.
 
@@ -342,6 +342,8 @@ Add to `DESIGN.md Sec. 7` "Known limitations":
 - **Do not** implement a persistent sidecar death monitor or automatic app-kill on sidecar failure. The nftables rule is the single fail-closed mechanism.
 
 **EXTENSION POINT:** A future revision may add a Clash API health check (e.g., `GET /` with a bearer token) to `isSidecarHealthy`, replacing the coarse `docker inspect` check. This requires injecting an API secret into the generated sing-box config and is deferred until needed.
+
+**EXTENSION POINT:** A future revision may restore a built-in private-range deny list (e.g. RFC 1918, loopback, link-local). Removing it in this version means the generated config hash differs for identical user configs, causing all existing sandboxes to be flagged as stale on upgrade. This is a one-time migration concern.
 - **Do not** support Windows natively (unchanged from v1).
 
 ---
