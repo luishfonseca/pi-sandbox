@@ -67,18 +67,7 @@ export function normalizeCidr(cidr: string): string {
 
 const NETWORK_KEYS = new Set(['domains', 'cidrs', 'denyCidrs']);
 
-const PRIVATE_CIDRS = [
-  '0.0.0.0/8',
-  '10.0.0.0/8',
-  '100.64.0.0/10',
-  '127.0.0.0/8',
-  '169.254.0.0/16',
-  '172.16.0.0/12',
-  '192.168.0.0/16',
-  '224.0.0.0/4',
-  '240.0.0.0/4',
-  '255.255.255.255/32',
-];
+const ROUTING_MARK = 0xca_fe;
 
 export function extractNetwork(
   value: unknown,
@@ -153,8 +142,6 @@ export function generateSingBoxConfig(network: NetworkConfig): unknown {
   wildcardDomains.sort((a, b) => b.length - a.length);
 
   const cidrEntries = [
-    ...PRIVATE_CIDRS.map((c) => ({ cidr: c, deny: true as const })),
-    { cidr: '::/0', deny: true as const },
     ...denyCidrs.map((c) => ({ cidr: c, deny: true as const })),
     ...cidrs.map((c) => ({ cidr: c, deny: false as const })),
   ];
@@ -198,7 +185,7 @@ export function generateSingBoxConfig(network: NetworkConfig): unknown {
   return {
     log: { level: 'warn' },
     dns: {
-      servers: [{ tag: 'upstream', type: 'udp', server: '1.1.1.1' }],
+      servers: [{ tag: 'upstream', type: 'udp', server: '1.1.1.1', routing_mark: ROUTING_MARK }],
       rules: dnsRules,
     },
     inbounds: [
@@ -215,7 +202,7 @@ export function generateSingBoxConfig(network: NetworkConfig): unknown {
         sniff_override_destination: true,
       },
     ],
-    outbounds: [{ type: 'direct', tag: 'direct' }],
+    outbounds: [{ type: 'direct', tag: 'direct', routing_mark: ROUTING_MARK }],
     route: {
       rules: routeRules,
       auto_detect_interface: true,
@@ -226,19 +213,4 @@ export function generateSingBoxConfig(network: NetworkConfig): unknown {
 
 export function hasNetworkPolicy(config: { network: NetworkConfig }): boolean {
   return Object.keys(config.network).length > 0;
-}
-
-export function checkBuiltInDenyOverlaps(network: NetworkConfig): string[] {
-  const warnings: string[] = [];
-  const builtInSet = new Set(PRIVATE_CIDRS);
-  for (const cidr of network.cidrs ?? []) {
-    if (builtInSet.has(cidr)) {
-      warnings.push(
-        `[pi-sandbox] CIDR "${cidr}" in network.cidrs matches a built-in private-range deny rule. ` +
-          `Because built-in denies win ties at the same prefix length, this allow will be blocked. ` +
-          `Use a more specific prefix (e.g. "${cidr.replace(/\/\d+$/, '/32')}") if you need to allow a specific host.`,
-      );
-    }
-  }
-  return warnings;
 }

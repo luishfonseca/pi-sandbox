@@ -20,12 +20,13 @@ import {
   getContainerStatus,
   pullImage,
   stopAndRemoveContainer,
-  stopAndRemoveSidecar,
+  stopAndRemoveNetwork,
 } from './docker.js';
 import {
   acquireSessionRef,
   computeConfigHash,
   computeContainerName,
+  computeNetworkName,
   computeSidecarName,
   countStaleRefs,
   deleteConfigHash,
@@ -67,7 +68,7 @@ function loadConfigWithFallback(
   }
 }
 
-function formatNetworkSection(network: NetworkConfig): string {
+function formatNetworkSection(network: NetworkConfig, sidecarStatus?: string): string {
   if (Object.keys(network).length === 0) {
     return 'Network: none';
   }
@@ -75,7 +76,7 @@ function formatNetworkSection(network: NetworkConfig): string {
   if (network.domains?.length) allow.push(...network.domains);
   if (network.cidrs?.length) allow.push(...network.cidrs);
   const deny = network.denyCidrs ?? [];
-  return `Network:\n  allow: ${allow.join(', ') || '(none)'}\n  deny: ${deny.join(', ') || '(none)'}`;
+  return `Network:\n  allow: ${allow.join(', ') || '(none)'}\n  deny: ${deny.join(', ') || '(none)'}\n  sidecar: ${sidecarStatus ?? 'unknown'}`;
 }
 
 function formatConfigStaleness(storedHash: string | undefined, configHash: string): string {
@@ -92,6 +93,7 @@ function formatSandboxStatusLines(
   configHash: string,
   configStaleness: string,
   sessionIds: string[],
+  sidecarStatus?: string,
 ): string[] {
   return [
     'Sandbox status:',
@@ -102,7 +104,7 @@ function formatSandboxStatusLines(
     'Filesystem:',
     `  rw: ${config.filesystem.rw.join(', ') || '(none)'}`,
     `  ro: ${config.filesystem.ro.join(', ') || '(none)'}`,
-    formatNetworkSection(config.network),
+    formatNetworkSection(config.network, sidecarStatus),
     `Sessions: ${String(sessionIds.length)} active (${sessionIds.slice(0, 10).join(', ')}${sessionIds.length > 10 ? ', ...' : ''})`,
   ];
 }
@@ -193,7 +195,9 @@ export function createSandboxExtension(
           await stopAndRemoveContainerFn(docker, containerName);
           if (state.config && hasNetworkPolicy(state.config)) {
             const sidecarName = computeSidecarName(state.workspaceAbsolutePath);
-            await stopAndRemoveSidecar(docker, sidecarName);
+            const networkName = computeNetworkName(state.workspaceAbsolutePath);
+            await stopAndRemoveContainerFn(docker, sidecarName);
+            await stopAndRemoveNetwork(docker, networkName);
           }
           state.container = undefined;
           deleteConfigHash(stateDir);
@@ -308,6 +312,15 @@ export function createSandboxExtension(
           throw err;
         }
 
+        let sidecarStatus: string | undefined;
+        if (hasNetworkPolicy(effectiveConfig)) {
+          try {
+            sidecarStatus = await getContainerStatusFn(docker, computeSidecarName(workspacePath));
+          } catch {
+            sidecarStatus = 'unknown';
+          }
+        }
+
         let sessionIds: string[] = [];
         try {
           sessionIds = readdirSync(`${stateDir}/sessions`);
@@ -326,6 +339,7 @@ export function createSandboxExtension(
           configHash,
           configStaleness,
           sessionIds,
+          sidecarStatus,
         );
 
         ctx.ui.notify(lines.join('\n'), 'info');
@@ -369,7 +383,9 @@ export function createSandboxExtension(
           await stopAndRemoveContainerFn(docker, containerName);
           if (hasNetworkPolicy(effectiveConfig)) {
             const sidecarName = computeSidecarName(workspacePath);
-            await stopAndRemoveSidecar(docker, sidecarName);
+            const networkName = computeNetworkName(workspacePath);
+            await stopAndRemoveContainerFn(docker, sidecarName);
+            await stopAndRemoveNetwork(docker, networkName);
           }
           state.container = undefined;
           delete state.fatalError;

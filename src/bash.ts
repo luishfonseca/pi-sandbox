@@ -3,9 +3,7 @@ import {
   type ExecInContainerOptions,
   type ExecInContainerResult,
   execInContainer,
-  isSidecarHealthy,
-  killContainer,
-  watchSidecarEvents,
+  getContainerStatus,
 } from './docker.js';
 import { computeContainerName, computeSidecarName, getStateDir } from './lifecycle.js';
 import { hasNetworkPolicy } from './network.js';
@@ -163,56 +161,18 @@ function buildExecOptions(
   return opts;
 }
 
-interface SidecarMonitor {
-  abortController: AbortController;
-  deathPromise: Promise<void>;
-}
-
-async function beginSidecarMonitoring(
+async function checkSidecarRunning(
   docker: Dockerode,
   workspaceAbsolutePath: string,
-): Promise<{ monitor: SidecarMonitor } | { error: string }> {
+): Promise<{ ok: true } | { error: string }> {
   const sidecarName = computeSidecarName(workspaceAbsolutePath);
-  const abortController = new AbortController();
-  const deathPromise = watchSidecarEvents(docker, sidecarName, abortController.signal);
-
-  const healthy = await isSidecarHealthy(docker, sidecarName);
-  if (!healthy) {
-    abortController.abort();
+  const status = await getContainerStatus(docker, sidecarName);
+  if (status !== 'running') {
     return {
-      error: 'Egress sidecar is not healthy. Run /sandbox-reset to recreate the sandbox.',
+      error: 'Egress sidecar is not running. Run /sandbox-reset to recreate the sandbox.',
     };
   }
-
-  return { monitor: { abortController, deathPromise } };
-}
-
-async function raceExecAgainstSidecar(
-  execPromise: Promise<ExecInContainerResult>,
-  sidecarDeathPromise: Promise<void>,
-  docker: Dockerode,
-  workspaceAbsolutePath: string,
-): Promise<{ result: ExecInContainerResult } | { error: string }> {
-  const execWrapped = execPromise.then((r) => ({ type: 'exec' as const, result: r }));
-  const sidecarWrapped = sidecarDeathPromise.then(() => ({ type: 'sidecar' as const }));
-
-  const race = await Promise.race([execWrapped, sidecarWrapped]);
-
-  if (race.type === 'sidecar') {
-    const appName = computeContainerName(workspaceAbsolutePath);
-    await killContainer(docker, appName);
-    try {
-      await execPromise;
-    } catch {
-      /* ignore */
-    }
-    return {
-      error:
-        'Egress sidecar died during command execution. Run /sandbox-reset to recreate the sandbox.',
-    };
-  }
-
-  return { result: race.result };
+  return { ok: true };
 }
 
 function formatExecResult(
@@ -330,35 +290,15 @@ export function createBashToolHandler(
         onUpdate,
       );
 
-      let sidecarMonitor: SidecarMonitor | undefined;
       if (deps.state.config && hasNetworkPolicy(deps.state.config)) {
-        const monitorResult = await beginSidecarMonitoring(deps.docker, workspaceAbsolutePath);
-        if ('error' in monitorResult) {
-          deps.state.fatalError = monitorResult.error;
-          return createErrorResult(monitorResult.error);
+        const sidecarCheck = await checkSidecarRunning(deps.docker, workspaceAbsolutePath);
+        if ('error' in sidecarCheck) {
+          deps.state.fatalError = sidecarCheck.error;
+          return createErrorResult(sidecarCheck.error);
         }
-        sidecarMonitor = monitorResult.monitor;
       }
 
-      const execPromise = deps.execInContainerFn(container, execOptions);
-
-      let execResult: ExecInContainerResult;
-      if (sidecarMonitor) {
-        const raceResult = await raceExecAgainstSidecar(
-          execPromise,
-          sidecarMonitor.deathPromise,
-          deps.docker,
-          workspaceAbsolutePath,
-        );
-        sidecarMonitor.abortController.abort();
-        if ('error' in raceResult) {
-          deps.state.fatalError = raceResult.error;
-          return createErrorResult(raceResult.error);
-        }
-        execResult = raceResult.result;
-      } else {
-        execResult = await execPromise;
-      }
+      const execResult = await deps.execInContainerFn(container, execOptions);
 
       const formatted = formatExecResult(execResult, timeout);
       return {

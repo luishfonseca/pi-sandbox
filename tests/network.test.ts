@@ -232,32 +232,6 @@ describe('generateSingBoxConfig', () => {
     assert.ok(idx16 !== -1, '/16 rule not found');
     assert.ok(idx24 < idx16, 'longer prefix (/24) should precede shorter prefix (/16)');
   });
-
-  it('includes built-in private range deny CIDRs', () => {
-    const config = generateSingBoxConfig({}) as { route: { rules: unknown[] } };
-    const cidrRules = config.route.rules.filter(
-      (r: unknown) => (r as Record<string, unknown>).ip_cidr !== undefined,
-    );
-    const hasPrivateDeny = cidrRules.some(
-      (r: unknown) =>
-        ((r as Record<string, unknown>).ip_cidr as string[]).includes('10.0.0.0/8') &&
-        (r as Record<string, unknown>).action === 'reject',
-    );
-    assert.strictEqual(hasPrivateDeny, true);
-  });
-
-  it('includes IPv6 deny-all CIDR', () => {
-    const config = generateSingBoxConfig({}) as { route: { rules: unknown[] } };
-    const cidrRules = config.route.rules.filter(
-      (r: unknown) => (r as Record<string, unknown>).ip_cidr !== undefined,
-    );
-    const hasV6Deny = cidrRules.some(
-      (r: unknown) =>
-        ((r as Record<string, unknown>).ip_cidr as string[]).includes('::/0') &&
-        (r as Record<string, unknown>).action === 'reject',
-    );
-    assert.strictEqual(hasV6Deny, true);
-  });
 });
 
 describeIntegration('sing-box config validation', () => {

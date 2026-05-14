@@ -1,5 +1,5 @@
 import { isNodeError } from './acl.js';
-import { type NetworkConfig, checkBuiltInDenyOverlaps, extractNetwork } from './network.js';
+import { type NetworkConfig, extractNetwork } from './network.js';
 import { expandTilde } from './path.js';
 import deepmerge from 'deepmerge';
 import { readFileSync } from 'node:fs';
@@ -291,9 +291,6 @@ export function loadConfig(workspacePath: string): {
 
   const networkResult = extractNetwork(merged.network, 'merged config');
   merged.network = networkResult.config ?? {};
-  if (Object.keys(merged.network).length > 0) {
-    mergeWarnings.push(...checkBuiltInDenyOverlaps(merged.network));
-  }
   mergeWarnings.push(...networkResult.warnings);
 
   validateConfig(merged);
