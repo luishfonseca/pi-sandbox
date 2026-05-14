@@ -181,30 +181,11 @@ export function createSandboxExtension(
       workspacePath: string,
       config: { network: NetworkConfig },
     ): Promise<void> {
-      const errors: Error[] = [];
-
-      try {
-        await stopAndRemoveContainerFn(docker, computeContainerName(workspacePath));
-      } catch (err) {
-        errors.push(err instanceof Error ? err : new Error(String(err)));
-      }
+      await stopAndRemoveContainerFn(docker, computeContainerName(workspacePath));
 
       if (hasNetworkPolicy(config)) {
-        try {
-          await stopAndRemoveContainerFn(docker, computeSidecarName(workspacePath));
-        } catch (err) {
-          errors.push(err instanceof Error ? err : new Error(String(err)));
-        }
-        try {
-          await stopAndRemoveNetwork(docker, computeNetworkName(workspacePath));
-        } catch (err) {
-          errors.push(err instanceof Error ? err : new Error(String(err)));
-        }
-      }
-
-      const firstError = errors[0];
-      if (firstError) {
-        throw firstError;
+        await stopAndRemoveContainerFn(docker, computeSidecarName(workspacePath));
+        await stopAndRemoveNetwork(docker, computeNetworkName(workspacePath));
       }
     }
 

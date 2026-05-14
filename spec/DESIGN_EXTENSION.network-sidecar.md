@@ -151,7 +151,7 @@ docker network create pi-sandbox-{workspaceHash}-net
 - This is a **standard** Docker bridge network (not `--internal`). It provides the sidecar with a route to the internet.
 - The network name includes `workspaceHash` so each workspace gets its own isolated L2 domain. Sidecars from different workspaces cannot reach each other.
 - If the network already exists, creation is idempotent.
-- The network is **not** removed on session teardown; it is left for reuse.
+- The network is removed on session teardown alongside the sidecar and app containers.
 
 ### 3.3 sing-box Sidecar Specification
 
@@ -343,7 +343,7 @@ Add to `DESIGN.md Sec. 7` "Known limitations":
 
 **EXTENSION POINT:** A future revision may add a Clash API health check (e.g., `GET /` with a bearer token) to `isSidecarHealthy`, replacing the coarse `docker inspect` check. This requires injecting an API secret into the generated sing-box config and is deferred until needed.
 
-**EXTENSION POINT:** A future revision may restore a built-in private-range deny list (e.g. RFC 1918, loopback, link-local). Removing it in this version means the generated config hash differs for identical user configs, causing all existing sandboxes to be flagged as stale on upgrade. This is a one-time migration concern.
+**EXTENSION POINT:** A future revision may add a post-DNS-resolution filter that blocks connections to private/reserved IPs (RFC 1918, loopback, link-local, metadata services) even when the destination domain is in the allowlist. Currently, if an allowed domain resolves to e.g. `169.254.169.254`, sing-box will permit the connection because domain rules are evaluated after CIDR rules and there is no built-in private-range deny list. A post-resolve filter would check the returned A/AAAA record against a hardcoded deny list before allowing the domain rule to match.
 - **Do not** support Windows natively (unchanged from v1).
 
 ---
