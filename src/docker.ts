@@ -18,7 +18,8 @@ export class DockerDaemonUnreachableError extends Error {
 }
 
 export interface ExecInContainerOptions {
-  command: string;
+  command?: string;
+  argv?: string[];
   cwd: string;
   timeout?: number | undefined;
   signal?: AbortSignal | undefined;
@@ -379,14 +380,23 @@ export async function execInContainer(
   container: Dockerode.Container,
   options: ExecInContainerOptions,
 ): Promise<ExecInContainerResult> {
-  const { command, cwd, timeout, signal, onUpdate } = options;
+  const { command, argv, cwd, timeout, signal, onUpdate } = options;
 
   if (signal?.aborted) {
     return abortedResult();
   }
 
+  if ((command === undefined) === (argv === undefined)) {
+    throw new Error('execInContainer: exactly one of command or argv must be provided');
+  }
+
+  const cmd = argv ?? ['sh', '-c', command ?? ''];
+  if (!argv && command === undefined) {
+    throw new Error('execInContainer: command must be provided when argv is not');
+  }
+
   const exec = await container.exec({
-    Cmd: ['sh', '-c', command],
+    Cmd: cmd,
     WorkingDir: cwd,
     AttachStdout: true,
     AttachStderr: true,

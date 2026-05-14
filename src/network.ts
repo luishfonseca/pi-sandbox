@@ -359,7 +359,7 @@ export async function installNftablesRules(
   ];
 
   for (const cmd of cmds) {
-    const result = await exec(container, { command: cmd.join(' '), cwd: '/' });
+    const result = await exec(container, { argv: cmd, cwd: '/' });
     if (result.exitCode !== 0) {
       throw new Error(
         `nft command failed (exit ${String(result.exitCode)}): ${cmd.join(' ')} — ${result.stderr.trim()}`,
