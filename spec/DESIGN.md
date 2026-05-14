@@ -31,7 +31,7 @@ The system MUST NOT:
 - Execute `bash` tool calls on the host filesystem when sandbox mode is active.
 - Translate, rewrite, or remap paths between host and container representations for `read`/`write`/`edit`.
 - Automatically restart failed containers or implement a background health-check polling loop.
-- Implement an egress sidecar, DNS proxy, or IP-layer filtering. Network isolation uses `--network none` in v1.
+- Implement an egress sidecar, DNS proxy, or IP-layer filtering when `network` config is absent or `{}`. When `network` is configured per DESIGN_EXTENSION.network-sidecar.md, these features are provided by the sing-box sidecar.
 
 ---
 
@@ -277,7 +277,7 @@ See [DESIGN_EXTENSION.workspace-scoped.md](DESIGN_EXTENSION.workspace-scoped.md)
 | Property | Mechanism | Guarantee |
 |---|---|---|
 | Workspace isolation | Filesystem Guard + bind mounts | Host files outside project are blocked for `read`/`write`/`edit` and invisible to `bash` |
-| Network isolation | `HostConfig.NetworkMode: "none"` | No network access from sandbox |
+| Network isolation | sing-box sidecar + TUN + nftables mark filter | Default-deny at DNS and TCP/UDP layers. App cannot bypass the filter because it lacks `CAP_NET_ADMIN`. |
 | Process isolation | Docker container | Host PID namespace not shared |
 | Privilege dropping | `HostConfig.CapDrop: ["ALL"]`, `HostConfig.SecurityOpt: ["no-new-privileges:true"]` | Container cannot escalate privileges |
 | Filesystem hygiene | Workspace-scoped container with refcount | Shared across sessions in same workspace; automatic cleanup when last session ends |
@@ -342,6 +342,7 @@ The report MUST include:
 | `configStaleness` | [DESIGN_EXTENSION.workspace-scoped.md](DESIGN_EXTENSION.workspace-scoped.md) §2.6 | `current`, `stale`, or `unknown` |
 | `filesystem.rw` | Merged config (§3.2) | Read-write path prefixes |
 | `filesystem.ro` | Merged config (§3.2) | Read-only path prefixes |
+| `network` | Local config / container status | `none`, or structured health/policy summary |
 | `sessions.active` | §6.2 | Count of active session reference files |
 | `sessions.ids` | §6.2 | List of active session IDs (up to 10) |
 
@@ -394,13 +395,12 @@ Output:
 
 The following are explicitly deferred. v1 MUST compile and run without them.
 
-1. **Egress sidecar / per-domain filtering.** Replace `HostConfig.NetworkMode: "none"` with a bridge network + sidecar. Specified in [DESIGN_EXTENSION.network-sidecar.md](DESIGN_EXTENSION.network-sidecar.md).
-2. **Cache persistence.** Named volumes for package managers.
-3. **Symlink resolution.** Call `fs.realpathSync` before ACL evaluation. Specified in [DESIGN_EXTENSION.symlinks.md](DESIGN_EXTENSION.symlinks.md).
-4. **Mask / downgrade mounts.** VFS-level enforcement of read-only restrictions inside read-write trees.
-5. **Custom capabilities.** `capabilities: string[]` in config.
-6. **Config reload.** Recreate container when `sandbox.json` changes and user calls /reload.
-7. **`/sandbox-reset` command.** A registered command that force-stops and removes the workspace sandbox container, clearing all refcount state. This recreates the container with the latest config on the next session start. It is also used to recover from stale reference files after a crash. Specified in [DESIGN_EXTENSION.workspace-scoped.md](DESIGN_EXTENSION.workspace-scoped.md) §2.7.
+1. **Cache persistence.** Named volumes for package managers.
+2. **Symlink resolution.** Call `fs.realpathSync` before ACL evaluation. Specified in [DESIGN_EXTENSION.symlinks.md](DESIGN_EXTENSION.symlinks.md).
+3. **Mask / downgrade mounts.** VFS-level enforcement of read-only restrictions inside read-write trees.
+4. **Custom capabilities.** `capabilities: string[]` in config.
+5. **Config reload.** Recreate container when `sandbox.json` changes and user calls /reload.
+6. **`/sandbox-reset` command.** A registered command that force-stops and removes the workspace sandbox container, clearing all refcount state. This recreates the container with the latest config on the next session start. It is also used to recover from stale reference files after a crash. Specified in [DESIGN_EXTENSION.workspace-scoped.md](DESIGN_EXTENSION.workspace-scoped.md) §2.7.
 
 ---
 
