@@ -322,64 +322,13 @@ export async function ensureSidecarContainer(
   return { container: existing, created: false };
 }
 
-export async function runCommandInContainer(
-  container: Dockerode.Container,
-  cmd: string[],
-  options?: { cwd?: string },
-): Promise<{ stdout: string; stderr: string; exitCode: number | null }> {
-  const exec = await container.exec({
-    Cmd: cmd,
-    WorkingDir: options?.cwd,
-    AttachStdout: true,
-    AttachStderr: true,
-  });
-  const stream = await exec.start({ hijack: true, stdin: false });
-
-  const stdoutChunks: Buffer[] = [];
-  const stderrChunks: Buffer[] = [];
-
-  const stdout = new PassThrough();
-  const stderr = new PassThrough();
-
-  stdout.on('data', (chunk: Buffer) => stdoutChunks.push(chunk));
-  stderr.on('data', (chunk: Buffer) => stderrChunks.push(chunk));
-
-  const modem = (exec as unknown as { modem: DockerModem }).modem;
-  modem.demuxStream(stream, stdout, stderr);
-
-  await new Promise<void>((resolve, reject) => {
-    const onEnd = (): void => {
-      cleanup();
-      resolve();
-    };
-    const onClose = (): void => {
-      cleanup();
-      resolve();
-    };
-    const onError = (err: Error): void => {
-      cleanup();
-      reject(err);
-    };
-    const cleanup = (): void => {
-      stream.off('end', onEnd);
-      stream.off('close', onClose);
-      stream.off('error', onError);
-    };
-    stream.on('end', onEnd);
-    stream.on('close', onClose);
-    stream.on('error', onError);
-  });
-
-  const info = await exec.inspect();
-  return {
-    stdout: Buffer.concat(stdoutChunks).toString('utf-8'),
-    stderr: Buffer.concat(stderrChunks).toString('utf-8'),
-    exitCode: info.ExitCode ?? null,
-  };
-}
-
-export async function installNftablesRules(docker: Dockerode, sidecarName: string): Promise<void> {
+export async function installNftablesRules(
+  docker: Dockerode,
+  sidecarName: string,
+  execFn?: typeof execInContainer,
+): Promise<void> {
   const container = docker.getContainer(sidecarName);
+  const exec = execFn ?? execInContainer;
   const cmds = [
     ['nft', 'add', 'table', 'inet', 'sb-guard'],
     [
@@ -420,10 +369,10 @@ export async function installNftablesRules(docker: Dockerode, sidecarName: strin
   ];
 
   for (const cmd of cmds) {
-    const { exitCode, stderr } = await runCommandInContainer(container, cmd);
-    if (exitCode !== 0) {
+    const result = await exec(container, { command: cmd.join(' '), cwd: '/' });
+    if (result.exitCode !== 0) {
       throw new Error(
-        `nft command failed (exit ${String(exitCode)}): ${cmd.join(' ')} — ${stderr.trim()}`,
+        `nft command failed (exit ${String(result.exitCode)}): ${cmd.join(' ')} — ${result.stderr.trim()}`,
       );
     }
   }
