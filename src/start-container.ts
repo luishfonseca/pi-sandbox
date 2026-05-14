@@ -1,11 +1,5 @@
 import type { SandboxConfig } from './config.js';
-import {
-  ensureContainer,
-  ensureNetwork,
-  ensureSidecarContainer,
-  installNftablesRules,
-  pullImage,
-} from './docker.js';
+import { ensureContainer, pullImage } from './docker.js';
 import {
   computeConfigHash,
   computeNetworkName,
@@ -13,7 +7,13 @@ import {
   readStoredConfigHash,
   writeConfigHash,
 } from './lifecycle.js';
-import { generateSingBoxConfig, hasNetworkPolicy } from './network.js';
+import {
+  ensureNetwork,
+  ensureSidecarContainer,
+  generateSingBoxConfig,
+  hasNetworkPolicy,
+  installNftablesRules,
+} from './network.js';
 import type { SandboxState } from './state.js';
 import type Dockerode from 'dockerode';
 import { writeFileSync } from 'node:fs';
