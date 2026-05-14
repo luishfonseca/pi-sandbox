@@ -234,16 +234,12 @@ export async function stopAndRemoveContainer(
   }
 }
 
-export async function killContainer(docker: Dockerode, containerName: string): Promise<void> {
-  const container = docker.getContainer(containerName);
+export async function stopAndRemoveNetwork(docker: Dockerode, networkName: string): Promise<void> {
+  const network = docker.getNetwork(networkName);
   try {
-    await container.kill();
+    await network.remove();
   } catch (err) {
     if (isDockerNotFound(err)) {
-      return;
-    }
-    if (isDockerConflict(err)) {
-      // Container already stopped — benign.
       return;
     }
     rethrowDockerDaemonError(err);
@@ -326,80 +322,64 @@ export async function ensureSidecarContainer(
   return { container: existing, created: false };
 }
 
-export async function stopAndRemoveSidecar(docker: Dockerode, sidecarName: string): Promise<void> {
-  await stopAndRemoveContainer(docker, sidecarName);
-}
+export async function installNftablesRules(docker: Dockerode, sidecarName: string): Promise<void> {
+  const container = docker.getContainer(sidecarName);
+  const cmds = [
+    ['nft', 'add', 'table', 'inet', 'sb-guard'],
+    [
+      'nft',
+      'add',
+      'chain',
+      'inet',
+      'sb-guard',
+      'output',
+      '{',
+      'type',
+      'filter',
+      'hook',
+      'output',
+      'priority',
+      '0',
+      ';',
+      'policy',
+      'accept',
+      ';',
+      '}',
+    ],
+    [
+      'nft',
+      'add',
+      'rule',
+      'inet',
+      'sb-guard',
+      'output',
+      'oifname',
+      'eth0',
+      'meta',
+      'mark',
+      '!=',
+      '0xCAFE',
+      'drop',
+    ],
+  ];
 
-export async function isSidecarHealthy(docker: Dockerode, sidecarName: string): Promise<boolean> {
-  try {
-    const container = docker.getContainer(sidecarName);
-    const info = await container.inspect();
-    return info.State.Running;
-  } catch (err) {
-    if (isDockerNotFound(err) || err instanceof DockerDaemonUnreachableError) {
-      return false;
-    }
-    throw err;
-  }
-}
-
-export async function watchSidecarEvents(
-  docker: Dockerode,
-  sidecarName: string,
-  signal?: AbortSignal,
-): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const opts = {
-      filters: JSON.stringify({
-        container: [sidecarName],
-        event: ['die', 'stop', 'kill', 'oom'],
-      }),
-    };
-
-    docker.getEvents(opts, (err, stream) => {
-      if (err) {
-        reject(err instanceof Error ? err : new Error(String(err)));
-        return;
-      }
-      if (!stream) {
-        reject(new Error('No event stream'));
-        return;
-      }
-
-      const readableStream = stream as unknown as import('stream').Readable;
-
-      let resolved = false;
-      const cleanup = (): void => {
-        if (resolved) return;
-        resolved = true;
-        readableStream.destroy();
-      };
-
-      readableStream.on('data', () => {
-        cleanup();
-        resolve();
-      });
-      readableStream.on('end', () => {
-        cleanup();
-        resolve();
-      });
-      readableStream.on('error', (_err) => {
-        cleanup();
-        // Fail-closed: stream errors mean we lost visibility into sidecar state.
-        // Treat them the same as a sidecar death event (caller will kill the app).
-        // If we intentionally aborted the stream after exec won, resolve harmlessly.
-        resolve();
-      });
-
-      if (signal) {
-        const onAbort = (): void => {
-          cleanup();
-          resolve();
-        };
-        signal.addEventListener('abort', onAbort, { once: true });
-      }
+  for (const cmd of cmds) {
+    const exec = await container.exec({
+      Cmd: cmd,
+      AttachStdout: true,
+      AttachStderr: true,
     });
-  });
+    const stream = await exec.start({ hijack: true, stdin: false });
+    await new Promise<void>((resolve, reject) => {
+      stream.once('end', resolve);
+      stream.once('close', resolve);
+      stream.once('error', reject);
+    });
+    const info = await exec.inspect();
+    if (info.ExitCode !== 0) {
+      throw new Error(`nft command failed: ${cmd.join(' ')}`);
+    }
+  }
 }
 
 function abortedResult(): ExecInContainerResult {

@@ -212,6 +212,7 @@ describe('startSandboxContainer', () => {
             created: true,
           });
         },
+        installNftablesRulesFn: () => Promise.resolve(),
       },
       {
         image: 'alpine',
@@ -258,6 +259,7 @@ describe('startSandboxContainer', () => {
             container: { id: 's1' } as unknown as Dockerode.Container,
             created: true,
           }),
+        installNftablesRulesFn: () => Promise.resolve(),
       },
       {
         image: 'alpine',

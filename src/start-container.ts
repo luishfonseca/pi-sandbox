@@ -1,5 +1,11 @@
 import type { SandboxConfig } from './config.js';
-import { ensureContainer, ensureNetwork, ensureSidecarContainer, pullImage } from './docker.js';
+import {
+  ensureContainer,
+  ensureNetwork,
+  ensureSidecarContainer,
+  installNftablesRules,
+  pullImage,
+} from './docker.js';
 import {
   computeConfigHash,
   computeNetworkName,
@@ -35,6 +41,7 @@ export interface StartSandboxDependencies {
   pullImageFn: typeof pullImage;
   ensureNetworkFn?: typeof ensureNetwork;
   ensureSidecarContainerFn?: typeof ensureSidecarContainer;
+  installNftablesRulesFn?: typeof installNftablesRules;
 }
 
 export async function startSandboxContainer(
@@ -143,6 +150,9 @@ async function createContainers(
   writeFileSync(configPath, JSON.stringify(singBoxConfig, null, 2));
 
   await ensureSidecarFn(deps.docker, sidecarImage, sidecarName, networkName, configPath);
+
+  const installNftFn = deps.installNftablesRulesFn ?? installNftablesRules;
+  await installNftFn(deps.docker, sidecarName);
 
   return deps.ensureContainerFn(
     deps.docker,
