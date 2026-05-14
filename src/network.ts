@@ -1,3 +1,11 @@
+import {
+  execInContainer,
+  isDockerNotFound,
+  isDockerConflict,
+  rethrowDockerDaemonError,
+} from './docker.js';
+import Dockerode from 'dockerode';
+
 export interface NetworkConfig {
   domains?: string[];
   cidrs?: string[];
@@ -213,4 +221,149 @@ export function generateSingBoxConfig(network: NetworkConfig): unknown {
 
 export function hasNetworkPolicy(config: { network: NetworkConfig }): boolean {
   return Object.keys(config.network).length > 0;
+}
+
+export async function stopAndRemoveNetwork(docker: Dockerode, networkName: string): Promise<void> {
+  const network = docker.getNetwork(networkName);
+  try {
+    await network.remove();
+  } catch (err) {
+    if (isDockerNotFound(err)) {
+      return;
+    }
+    rethrowDockerDaemonError(err);
+    throw err;
+  }
+}
+
+export async function ensureNetwork(docker: Dockerode, networkName: string): Promise<void> {
+  const network = docker.getNetwork(networkName);
+  try {
+    await network.inspect();
+  } catch (err) {
+    if (!isDockerNotFound(err)) {
+      rethrowDockerDaemonError(err);
+      throw err;
+    }
+    try {
+      await docker.createNetwork({ Name: networkName, Driver: 'bridge' });
+    } catch (createErr) {
+      if (!isDockerConflict(createErr)) {
+        rethrowDockerDaemonError(createErr);
+        throw createErr;
+      }
+    }
+  }
+}
+
+export async function ensureSidecarContainer(
+  docker: Dockerode,
+  sidecarImage: string,
+  sidecarName: string,
+  networkName: string,
+  configPath: string,
+): Promise<{ container: Dockerode.Container; created: boolean }> {
+  const container = docker.getContainer(sidecarName);
+  try {
+    const info = await container.inspect();
+    if (!info.State.Running) {
+      await container.start();
+    }
+    return { container, created: false };
+  } catch (err) {
+    if (!isDockerNotFound(err)) {
+      rethrowDockerDaemonError(err);
+      throw err;
+    }
+  }
+
+  try {
+    const newContainer = await docker.createContainer({
+      name: sidecarName,
+      Image: sidecarImage,
+      Cmd: ['run', '-c', '/etc/sing-box/config.json'],
+      HostConfig: {
+        NetworkMode: networkName,
+        CapAdd: ['NET_ADMIN'],
+        Devices: [
+          { PathOnHost: '/dev/net/tun', PathInContainer: '/dev/net/tun', CgroupPermissions: 'rwm' },
+        ],
+        Binds: [`${configPath}:/etc/sing-box/config.json:ro`],
+        SecurityOpt: ['no-new-privileges:true'],
+        ReadonlyRootfs: true,
+        Tmpfs: { '/tmp': 'rw,noexec,nosuid,size=10m' },
+      },
+    });
+    await newContainer.start();
+    return { container: newContainer, created: true };
+  } catch (err) {
+    if (!isDockerConflict(err)) {
+      rethrowDockerDaemonError(err);
+      throw err;
+    }
+  }
+
+  const existing = docker.getContainer(sidecarName);
+  const existingInfo = await existing.inspect();
+  if (!existingInfo.State.Running) {
+    await existing.start();
+  }
+  return { container: existing, created: false };
+}
+
+export async function installNftablesRules(
+  docker: Dockerode,
+  sidecarName: string,
+  execFn?: typeof execInContainer,
+): Promise<void> {
+  const container = docker.getContainer(sidecarName);
+  const exec = execFn ?? execInContainer;
+  const markHex = '0x' + ROUTING_MARK.toString(16).toUpperCase();
+  const cmds = [
+    ['nft', 'add', 'table', 'inet', 'sb-guard'],
+    [
+      'nft',
+      'add',
+      'chain',
+      'inet',
+      'sb-guard',
+      'output',
+      '{',
+      'type',
+      'filter',
+      'hook',
+      'output',
+      'priority',
+      '0',
+      ';',
+      'policy',
+      'accept',
+      ';',
+      '}',
+    ],
+    [
+      'nft',
+      'add',
+      'rule',
+      'inet',
+      'sb-guard',
+      'output',
+      'oifname',
+      'eth0',
+      'meta',
+      'mark',
+      '!=',
+      markHex,
+      'drop',
+    ],
+  ];
+
+  for (const cmd of cmds) {
+    const result = await exec(container, { command: cmd.join(' '), cwd: '/' });
+    if (result.exitCode !== 0) {
+      throw new Error(
+        `nft command failed (exit ${String(result.exitCode)}): ${cmd.join(' ')} — ${result.stderr.trim()}`,
+      );
+    }
+  }
 }

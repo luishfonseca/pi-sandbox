@@ -20,7 +20,6 @@ import {
   getContainerStatus,
   pullImage,
   stopAndRemoveContainer,
-  stopAndRemoveNetwork,
 } from './docker.js';
 import {
   acquireSessionRef,
@@ -35,7 +34,7 @@ import {
   releaseSessionRef,
   resetState,
 } from './lifecycle.js';
-import { hasNetworkPolicy, type NetworkConfig } from './network.js';
+import { hasNetworkPolicy, stopAndRemoveNetwork, type NetworkConfig } from './network.js';
 import { Mutex, type SandboxState, createSandboxState } from './state.js';
 import type { ExtensionAPI } from '@mariozechner/pi-coding-agent';
 import { createBashTool, isToolCallEventType } from '@mariozechner/pi-coding-agent';

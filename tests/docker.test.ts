@@ -6,11 +6,8 @@ import {
   doesImageExist,
   ensureContainer,
   execInContainer,
-  installNftablesRules,
   pullImage,
   stopAndRemoveContainer,
-  stopAndRemoveNetwork,
-  type ExecInContainerResult,
 } from '../src/docker.js';
 import Dockerode from 'dockerode';
 import assert from 'node:assert';
@@ -341,66 +338,6 @@ describe('ensureContainer name conflict', () => {
     await assert.rejects(
       () => ensureContainer(docker, config, '/workspace', 'test-conflict-vanished'),
       /not found/,
-    );
-  });
-});
-
-describe('stopAndRemoveNetwork', () => {
-  it('resolves when network does not exist', async () => {
-    const docker = {
-      getNetwork: (): {
-        remove: () => Promise<never>;
-      } => ({
-        remove: (): Promise<never> =>
-          Promise.reject(Object.assign(new Error('not found'), { statusCode: 404 })),
-      }),
-    } as unknown as Dockerode;
-    await stopAndRemoveNetwork(docker, 'missing');
-  });
-
-  it('removes an existing network', async () => {
-    let removed = false;
-    const docker = {
-      getNetwork: (): {
-        remove: () => Promise<void>;
-      } => ({
-        remove: (): Promise<void> => {
-          removed = true;
-          return Promise.resolve();
-        },
-      }),
-    } as unknown as Dockerode;
-    await stopAndRemoveNetwork(docker, 'existing');
-    assert.strictEqual(removed, true);
-  });
-
-  it('throws DockerDaemonUnreachableError on connection error', async () => {
-    const docker = {
-      getNetwork: (): {
-        remove: () => Promise<never>;
-      } => ({
-        remove: (): Promise<never> => Promise.reject(new Error('ECONNREFUSED')),
-      }),
-    } as unknown as Dockerode;
-    await assert.rejects(() => stopAndRemoveNetwork(docker, 'foo'), /Docker daemon unreachable/);
-  });
-});
-
-describe('installNftablesRules', () => {
-  it('resolves when all commands succeed', async () => {
-    const docker = { getContainer: () => ({}) } as unknown as Dockerode;
-    const exec = (): Promise<ExecInContainerResult> =>
-      Promise.resolve({ stdout: '', stderr: '', exitCode: 0, timedOut: false, aborted: false });
-    await installNftablesRules(docker, 'sidecar', exec);
-  });
-
-  it('throws when a command fails', async () => {
-    const docker = { getContainer: () => ({}) } as unknown as Dockerode;
-    const exec = (): Promise<ExecInContainerResult> =>
-      Promise.resolve({ stdout: '', stderr: 'oops', exitCode: 1, timedOut: false, aborted: false });
-    await assert.rejects(
-      () => installNftablesRules(docker, 'sidecar', exec),
-      /nft command failed \(exit 1\)/,
     );
   });
 });
