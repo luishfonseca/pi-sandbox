@@ -84,7 +84,8 @@ The extension translates `NetworkConfig` into a sing-box JSON configuration file
 ```
 
 **DNS servers:**
-- One upstream resolver tagged `upstream` (`type`: `udp`, `server`: `1.1.1.1`).
+- One upstream resolver tagged `upstream` (`type`: `udp`, `server`: `1.1.1.1`, `routing_mark`: `51966`).
+  - *Rationale:* The DNS server MUST set `routing_mark` so that its own upstream queries (to `1.1.1.1`) are tagged with the sidecar mark and therefore permitted by the nftables output rule on `eth0`.
 
 **DNS rules (evaluated top-to-bottom):**
 1. For each allowed exact domain: a `domain` matcher with `"action": "route", "server": "upstream"`.
@@ -104,7 +105,8 @@ The extension translates `NetworkConfig` into a sing-box JSON configuration file
   - `sniff_override_destination`: `true`
 
 **Outbounds:**
-- `direct` (tag: `direct`).
+- `direct` (tag: `direct`, `routing_mark`: `51966`).
+  - *Rationale:* Every packet sing-box emits to the real internet MUST carry the mark `0xCAFE` (decimal `51966`). The nftables output rule in the shared network namespace drops any packet leaving via `eth0` that lacks this mark. Because the app has `CapDrop: ALL`, it cannot forge `SO_MARK`, so it cannot bypass the filter.
 
 **Route rules (evaluated top-to-bottom):**
 1. `"inbound": ["tun-in"], "action": "sniff"` — enable protocol sniffing (TLS SNI, HTTP Host header) on TUN connections. This rule **must** precede all matchers that depend on sniffed metadata because sing-box evaluates rules in pre-match before connection data is available; when it hits the `sniff` action it pauses, reads the initial bytes, then resumes matching with enriched metadata.
@@ -168,6 +170,24 @@ docker network create pi-sandbox-{workspaceHash}-net
 
 **No port publishing** is required.
 
+**Post-start hook:** After the sidecar container is running, the extension MUST execute a one-shot `docker exec` into the sidecar to install an nftables rule in the shared network namespace. The sing-box image sets `ENTRYPOINT ["sing-box"]`, so the exec MUST override the entrypoint (e.g. `--entrypoint nft`) to run the `nft` binary directly:
+
+```bash
+nft add table inet sb-guard
+nft add chain inet sb-guard output { type filter hook output priority 0 \; policy accept \; }
+nft add rule inet sb-guard output oifname "eth0" meta mark != 0xCAFE drop
+```
+
+- `inet` family covers both IPv4 and IPv6.
+- `oifname "eth0"` matches only the Docker bridge interface.
+- `meta mark != 0xCAFE drop` drops every packet that is not tagged with the sidecar's `routing_mark`.
+- The rule is installed **once** after creation. If the sidecar is restarted, the rule is recreated because the network namespace is recreated.
+- The official sing-box image is Alpine-based and already contains the `nftables` package (`nft` binary at `/usr/sbin/nft`). No custom image is required.
+
+**Precondition:** The sidecar is running and has `NET_ADMIN`.
+
+**Postcondition:** Any packet leaving `eth0` from the shared namespace without mark `0xCAFE` is dropped at the output hook.
+
 ### 3.4 App Sandbox Specification
 
 When network policy is active:
@@ -179,25 +199,18 @@ When network policy is active:
 - **No** extra devices or capabilities are required.
 - All other properties (bind mounts, env, working dir) are unchanged from `DESIGN.md Sec. 5.3`.
 
-**Rationale for shared netns:** The app must be in the same network namespace as the sidecar so that the TUN interface and its routing rules are visible to the app. Because the app has `CapDrop: ALL`, it cannot modify routes, iptables/nftables, or interfaces. It can observe the TUN and the internet-facing bridge interface, but it cannot remove the more-specific routes that sing-box installs, so it cannot bypass the filter.
+**Rationale for shared netns:** The app must be in the same network namespace as the sidecar so that the TUN interface and its routing rules are visible to the app. Because the app has `CapDrop: ALL`, it cannot modify routes, iptables/nftables, interfaces, or socket marks. It can observe the TUN and the internet-facing bridge interface, but it cannot remove the more-specific routes that sing-box installs, nor can it forge the `SO_MARK` required to bypass the nftables output rule.
 
 When network policy is `none`:
 
 - `HostConfig.NetworkMode` is `"none"` (unchanged from v1).
 
-### 3.5 Sidecar Monitoring
+### 3.5 Sidecar Health
 
-**Precondition (before every `bash` command):** The extension MUST verify via `docker inspect` that the sidecar container exists and `.State.Running` is `true`. If not, the extension MUST NOT execute the command. It MUST return an error to the user:
-> `"Egress sidecar is not healthy. Run /sandbox-reset to recreate the sandbox."`
+Before every `bash` command, the extension SHOULD verify via `docker inspect` that the sidecar container exists and `.State.Running` is `true`. If not, the extension SHOULD surface a warning in `/sandbox-status` and MAY return an error to the user:
+> `"Egress sidecar is not running. Run /sandbox-reset to recreate the sandbox."`
 
-**During command execution:** The extension MUST start a short-lived Docker event stream filtered to the sidecar container (`pi-sandbox-{workspaceHash}-egress`) for `die`, `stop`, `kill`, and `oom` events. The stream MUST be active for the entire duration of the `docker exec` call.
-
-**Postcondition on sidecar death during command:** If an event is received indicating the sidecar has stopped while the command is running, the extension MUST immediately kill the app sandbox container and return an error to the user:
-> `"Egress sidecar died during command execution. Run /sandbox-reset to recreate the sandbox."`
-
-**Postcondition on healthy completion:** If the command completes and no sidecar death event was received, return the command output normally.
-
-**Rationale:** The event stream is scoped to the `bash` command execution window only. It is not a persistent background monitor, consistent with `DESIGN.md §2`. The pre-command `docker inspect` check catches sidecar death between commands; the event stream catches death during the command.
+There is **no** persistent event stream, sidecar death monitor, or automatic killing of the app container. The nftables rule provides the fail-closed guarantee; if the sidecar stops, its network namespace (and therefore the nftables rule) is destroyed along with the TUN interface, and the app container loses all egress paths.
 
 ### 3.6 Lifecycle Ordering
 
@@ -205,13 +218,14 @@ When network policy is `none`:
 1. Ensure `pi-sandbox-{workspaceHash}-net` exists (create if absent).
 2. Generate sing-box config JSON from merged `network` config and write to state dir.
 3. Ensure sing-box sidecar exists and is running on `pi-sandbox-{workspaceHash}-net`. Create/start if absent, mounting the generated config.
-4. Ensure app sandbox exists and is running with `NetworkMode: container:<sidecar>`. Create/start if absent.
-5. Write config hash to state dir.
+4. Install the nftables output rule in the sidecar (Sec. 3.3). This step is idempotent; running the `nft add` commands against an existing table/chain is a benign no-op.
+5. Ensure app sandbox exists and is running with `NetworkMode: container:<sidecar>`. Create/start if absent.
+6. Write config hash to state dir.
 
 **Destruction** (last session ends or `/sandbox-reset`, inside lifecycle mutex):
 1. Stop and remove app sandbox.
 2. Stop and remove sing-box sidecar.
-3. `pi-sandbox-{workspaceHash}-net` is **not** removed; it is left for reuse.
+3. Remove `pi-sandbox-{workspaceHash}-net`.
 
 **Rationale:** The app container references the sidecar by name in `NetworkMode`. Docker resolves this name to a container ID at creation time. If the sidecar is removed and recreated, the app must also be recreated to attach to the new container's network namespace.
 
@@ -277,11 +291,13 @@ Network: none
 Network:
   allow: *.example.test, 192.0.2.0/24
   deny: 192.0.2.128/25
+  sidecar: running
 ```
 
 **Field sources:**
 - `allow`: Comma-separated list of `domains` and `cidrs` from the locally configured policy that was injected at container creation, or `"(none)"` if empty.
 - `deny`: Comma-separated list of `denyCidrs` from the locally configured policy, or `"(none)"` if empty.
+- `sidecar`: `running`, `stopped`, or `not found` based on a lightweight `docker inspect` of `pi-sandbox-{workspaceHash}-egress`.
 
 *(Rationale: sing-box does not expose a runtime policy API in this configuration. The extension reports the policy it last pushed to the sidecar via the generated config file.)*
 
@@ -303,14 +319,13 @@ Replace the `DESIGN.md Sec. 7` "Network isolation" row with:
 
 | Property | Mechanism | Guarantee |
 |---|---|---|
-| Network isolation | sing-box sidecar + TUN + shared netns + per-workspace bridge | Default-deny at DNS and TCP/UDP layers. App container has `CapDrop: ALL`; no extra capabilities required. All egress traffic is transparently intercepted by sing-box routing rules. |
+| Network isolation | sing-box sidecar + TUN + shared netns + per-workspace bridge + nftables mark filter | Default-deny at DNS and TCP/UDP layers. App container has `CapDrop: ALL`; no extra capabilities required. All egress traffic is transparently intercepted by sing-box routing rules. The nftables output rule drops any unmarked packet on `eth0`; because only sing-box can set the mark (`SO_MARK` requires `CAP_NET_ADMIN`), the app cannot bypass the filter even if the TUN interface or routes are modified. If the sidecar is destroyed, its network namespace is destroyed and the app loses all egress paths. |
 
 Add to `DESIGN.md Sec. 7` "Known limitations":
 
-- Isolation is enforced by sing-box routing rules inside a shared network namespace, not by physical network topology. If the sing-box process crashes or is killed, its TUN interface and routes disappear, and the app may fall back to direct internet access via the external bridge network. This is mitigated by a pre-command `docker inspect` liveness check and a short-lived Docker event stream scoped to each `bash` command execution that kills the app sandbox if the sidecar dies during the command.
 - Domain-based filtering relies on protocol sniffing (TLS SNI, HTTP Host header). Raw TCP connections without recoverable domain information are filtered by CIDR rules only. If such a connection targets an IP that is not covered by any `cidrs` or `denyCidrs` rule, it is rejected.
 - CIDR rules are evaluated before domain rules. An allowed domain that resolves to an IP within a `denyCidrs` entry is blocked.
-- The app shares the sidecar's network namespace and can therefore observe the presence of the internet-facing bridge interface. It cannot modify routes or interfaces because of `CapDrop: ALL`, so it cannot bypass sing-box while the sidecar is healthy.
+- The app shares the sidecar's network namespace and can therefore observe the presence of the internet-facing bridge interface. It cannot modify routes, interfaces, nftables rules, or socket marks because of `CapDrop: ALL`, so it cannot bypass the filter while the sidecar is healthy or after it dies.
 - `strict_route: true` forces all traffic through the TUN interface, including traffic to the Docker bridge subnet. Without it, more-specific connected routes for the bridge subnet would bypass sing-box.
 - Policy is static per container lifetime. Runtime policy changes require `/sandbox-reset`.
 - sing-box v1 configuration does not support a configurable default action; the default is always deny.
@@ -319,11 +334,12 @@ Add to `DESIGN.md Sec. 7` "Known limitations":
 
 ## 7. Non-Goals and Forbidden Patterns
 
-- **Do not** expose `mode`, `tunAddress`, `fakeIpRange`, `upstreamDns`, or other sing-box tuning knobs in `sandbox.json`.
+- **Do not** expose `mode`, `tunAddress`, `fakeIpRange`, `upstreamDns`, `routing_mark`, or other sing-box tuning knobs in `sandbox.json`.
 - **Do not** implement a Pi command for runtime policy updates (e.g. `/network-allow`).
 - **Do not** share the sing-box sidecar across different workspaces.
 - **Do not** fallback to `NetworkMode: "none"` when the sidecar fails to start. Fail fast.
 - **Do not** implement runtime sidecar health auto-recovery (e.g., restarting sing-box and reconnecting the app). Require explicit `/sandbox-reset`.
+- **Do not** implement a persistent sidecar death monitor or automatic app-kill on sidecar failure. The nftables rule is the single fail-closed mechanism.
 
 **EXTENSION POINT:** A future revision may add a Clash API health check (e.g., `GET /` with a bearer token) to `isSidecarHealthy`, replacing the coarse `docker inspect` check. This requires injecting an API secret into the generated sing-box config and is deferred until needed.
 - **Do not** support Windows natively (unchanged from v1).
